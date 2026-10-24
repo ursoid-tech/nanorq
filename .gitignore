@@ -25,3 +25,5 @@ t/interop_test_dir
 tsnc/examples/blockchain_gossip
 tsnc/examples/tsnc_multipath
 tsnc/examples/tsnc_sync
+t/00util/test_oblas_swap
+t/00util/test_oblas_kernels

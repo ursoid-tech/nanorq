@@ -108,6 +108,7 @@ static inline int __builtin_cpu_supports(const char *feature)
 extern "C" {
 #endif
 
+/* swap k bytes in identical or disjoint ranges; partial overlap is unsupported */
 void obl_swap(uint8_t *a, uint8_t *b, unsigned k);
 void *obl_alloc(size_t num_rows, size_t row_size, size_t alignment);
 void obl_free(void *ptr);
