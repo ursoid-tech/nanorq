@@ -341,7 +341,7 @@ static int precode_matrix_solve_gf256(params *P, pc *W) {
 }
 
 static void precode_matrix_backsolve(params *P, pc *W) {
-  for (u32 row = P->L - 1; row >= W->i; row--) {
+  for (u32 row = P->L; row-- > W->i;) {
     u32_vec cs = W->AT[uv_A(W->c, row)];
     for (u32 it = 0; it < uv_size(cs); it++) {
       u32 del_row = uv_A(W->di, uv_A(cs, it));

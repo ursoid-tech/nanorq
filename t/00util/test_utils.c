@@ -1,7 +1,9 @@
+#include "nanorq_core.h"
 #include "partition.h"
 #include "sopi.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 void test_partition() {
   printf("Testing partition...\n");
@@ -50,9 +52,31 @@ void test_sopi() {
   printf("SOPI tests passed.\n");
 }
 
+static u32 choose_no_rows(void *arg, pc *W, u32 V0, u32 Vrows, u32 Srows,
+                          u32 Vcols) {
+  return Srows;
+}
+
+static void test_no_preconditioned_rows(void) {
+  nanorq_core rq = {0};
+  assert(nanorq_core_encoder_new(100, 0, &rq));
+  size_t prep_len = nanorq_core_calculate_prepare_memory(&rq);
+  size_t work_len = nanorq_core_calculate_work_memory(&rq);
+  uint8_t *prep = malloc(prep_len), *work = malloc(work_len);
+  assert(prep && work);
+  assert(nanorq_core_prepare(&rq, prep, prep_len));
+  nanorq_core_set_choose_callback(&rq, NULL, choose_no_rows);
+  assert(nanorq_core_patch_matrix(&rq));
+  assert(rq.W.i == 0);
+  assert(nanorq_core_precalculate(&rq, work, work_len));
+  free(work);
+  free(prep);
+}
+
 int main() {
   test_partition();
   test_sopi();
+  test_no_preconditioned_rows();
   printf("All utility tests passed successfully!\n");
   return 0;
 }
