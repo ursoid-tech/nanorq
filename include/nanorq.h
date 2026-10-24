@@ -76,7 +76,7 @@ size_t nanorq_encode(nanorq *rq, void *data, uint32_t esi, uint8_t sbn,
 // cleanup encoder resources of a given block
 void nanorq_encoder_cleanup(nanorq *rq, uint8_t sbn);
 
-// reset internal state
+/* reset block state for reuse; keep allocations until cleanup */
 void nanorq_encoder_reset(nanorq *rq, uint8_t sbn);
 
 // returns a new decoder initialized with given parameters
