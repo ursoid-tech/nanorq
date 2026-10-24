@@ -26,12 +26,17 @@ bool u32_vec_init(u32_vec *v, arena *a, u32 n, u32 m, u32 s) {
   return true;
 }
 
-u8 bm_get(u32_vec *v, u32 i, u32 j) {
-  u32 *a = v->a + i * v->s;
-  u32 q = j / 32;
-  u32 r = j % 32;
-  return (a[q] >> r) & 1;
+bool u32_vec_reserve(u32_vec *v, arena *a, u32 m) {
+  v->a = (u32 *)alloc_uninit(a, sizeof(u32), nanorq_oblas.align_size, m);
+  if (!v->a && m > 0)
+    return false;
+  v->s = 0;
+  v->n = 0;
+  v->m = m;
+  return true;
 }
+
+u8 bm_get(u32_vec *v, u32 i, u32 j) { return bm_at(v, i, j); }
 
 void bm_set(u32_vec *v, u32 i, u32 j) {
   u32 *a = v->a + i * v->s;

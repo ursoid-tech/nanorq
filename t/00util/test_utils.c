@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 void test_partition() {
   printf("Testing partition...\n");
@@ -52,6 +53,43 @@ void test_sopi() {
   printf("SOPI tests passed.\n");
 }
 
+void test_prepared_workspace() {
+  const unsigned ks[] = {100, 1000, 5000};
+  for (unsigned t = 0; t < sizeof(ks) / sizeof(*ks); t++) {
+    nanorq_core rq;
+    memset(&rq, 0xa5, sizeof(rq));
+    assert(nanorq_core_encoder_new(ks[t], 0, &rq));
+    size_t bound = nanorq_core_calculate_work_memory(&rq);
+    size_t prep_len = nanorq_core_calculate_prepare_memory(&rq);
+    uint8_t *prep = malloc(prep_len);
+    assert(prep && nanorq_core_prepare(&rq, prep, prep_len));
+    size_t exact = nanorq_core_calculate_prepared_work_memory(&rq);
+    assert(nanorq_core_calculate_work_memory(&rq) == bound);
+    assert(exact > 0 && exact < bound);
+    uint8_t *work = malloc(exact + 128);
+    assert(work);
+    memset(work, 0xa5, exact + 128);
+    assert(nanorq_core_precalculate(&rq, work + 1, exact));
+    assert(work[0] == 0xa5);
+    for (size_t i = exact + 1; i < exact + 128; i++)
+      assert(work[i] == 0xa5);
+    /* new equation matrix invalidates prepared width */
+    assert(nanorq_core_generate(&rq, prep, prep_len));
+    assert(nanorq_core_calculate_work_memory(&rq) == bound);
+    assert(nanorq_core_calculate_prepared_work_memory(&rq) == 0);
+    nanorq_core_replace_symbol(&rq, 0, 0);
+    assert(nanorq_core_patch_matrix(&rq));
+    assert(nanorq_core_calculate_prepared_work_memory(&rq) == exact);
+    nanorq_core_replace_symbol(&rq, 0, 0);
+    assert(nanorq_core_calculate_prepared_work_memory(&rq) == 0);
+    assert(nanorq_core_encoder_new(ks[t], 0, &rq));
+    assert(nanorq_core_calculate_work_memory(&rq) == bound);
+    assert(nanorq_core_calculate_prepared_work_memory(&rq) == 0);
+    free(work);
+    free(prep);
+  }
+}
+
 static u32 choose_no_rows(void *arg, pc *W, u32 V0, u32 Vrows, u32 Srows,
                           u32 Vcols) {
   return Srows;
@@ -76,6 +114,7 @@ static void test_no_preconditioned_rows(void) {
 int main() {
   test_partition();
   test_sopi();
+  test_prepared_workspace();
   test_no_preconditioned_rows();
   printf("All utility tests passed successfully!\n");
   return 0;

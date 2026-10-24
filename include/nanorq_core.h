@@ -21,6 +21,9 @@ bool nanorq_core_encoder_new(uint32_t K, uint32_t overhead, nanorq_core *rq);
 /* return the amount of memory required for preconditioning */
 size_t nanorq_core_calculate_prepare_memory(nanorq_core *rq);
 
+/* generate equations without preconditioning */
+bool nanorq_core_generate(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len);
+
 /* prepare rq matrix for inversion */
 bool nanorq_core_prepare(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len);
 
@@ -34,8 +37,11 @@ void nanorq_core_replace_symbol(nanorq_core *rq, u32 row, u32 esi);
 /* patch the matrix after symbol replacements */
 bool nanorq_core_patch_matrix(nanorq_core *rq);
 
-/* return the amount of memory required for inversion */
+/* conservative memory required for inversion */
 size_t nanorq_core_calculate_work_memory(nanorq_core *rq);
+
+/* exact workspace bound after prepare or patch */
+size_t nanorq_core_calculate_prepared_work_memory(nanorq_core *rq);
 
 /* precalculate rq matrix inversion */
 bool nanorq_core_precalculate(nanorq_core *rq, uint8_t *work_mem,

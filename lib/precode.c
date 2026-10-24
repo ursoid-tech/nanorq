@@ -81,7 +81,7 @@ static bool precode_matrix_transpose(params *P, pc *W) {
     W->AT_mem_beg = a->beg;
   a->beg = W->AT_mem_beg;
   for (u32 row = 0; row < W->cols; row++) {
-    if (!u32_vec_init(&W->AT[row], a, 0, uv_A(W->cnz, row), 0))
+    if (!u32_vec_reserve(&W->AT[row], a, uv_A(W->cnz, row)))
       return false;
   }
 
