@@ -81,7 +81,7 @@ static bool precode_matrix_transpose(params *P, pc *W) {
     W->AT_mem_beg = a->beg;
   a->beg = W->AT_mem_beg;
   for (u32 row = 0; row < W->cols; row++) {
-    if (!u32_vec_init(&W->AT[row], a, 0, uv_A(W->cnz, row), 0))
+    if (!u32_vec_reserve(&W->AT[row], a, uv_A(W->cnz, row)))
       return false;
   }
 
@@ -341,7 +341,7 @@ static int precode_matrix_solve_gf256(params *P, pc *W) {
 }
 
 static void precode_matrix_backsolve(params *P, pc *W) {
-  for (u32 row = P->L - 1; row >= W->i; row--) {
+  for (u32 row = P->L; row-- > W->i;) {
     u32_vec cs = W->AT[uv_A(W->c, row)];
     for (u32 it = 0; it < uv_size(cs); it++) {
       u32 del_row = uv_A(W->di, uv_A(cs, it));

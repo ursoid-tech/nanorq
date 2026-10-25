@@ -132,29 +132,54 @@ static void obl_axpyb32_ref(u8 *a, u32 *b, u8 u, unsigned k)
         op##_ref((u8 *)ap, (u8 *)bp, u, k % sizeof(VEC_TYPE));                                                                     \
     } while (0)
 
-#define GENERATE_IMPL(suffix, attr, VEC_TYPE, VEC_LOAD, VEC_STORE, VEC_INIT, VEC_CORE, VEC_XOR)                                    \
-    attr static void obl_axpy_##suffix(u8 *restrict a, u8 *restrict b, u8 u, unsigned k)                                           \
-    {                                                                                                                              \
-        if (u == 1) {                                                                                                              \
-            u8 *restrict ap = a;                                                                                                   \
-            u8 *ae = a + k;                                                                                                        \
-            const u8 *restrict bp = b;                                                                                             \
-            for (; ap < ae; ap++, bp++)                                                                                            \
-                *ap ^= *bp;                                                                                                        \
-        } else {                                                                                                                   \
-            OBL_SHUF_TEMPLATE(obl_axpy, a, b, VEC_XOR, VEC_TYPE, VEC_LOAD, VEC_STORE, VEC_INIT, VEC_CORE, VEC_XOR);                \
-        }                                                                                                                          \
-    }                                                                                                                              \
-    attr static void obl_axiy_##suffix(u8 *a, u8 *b, u8 u, unsigned k)                                                             \
-    {                                                                                                                              \
-        OBL_SHUF_TEMPLATE(obl_axiy, a, b, OBL_NOOP, VEC_TYPE, VEC_LOAD, VEC_STORE, VEC_INIT, VEC_CORE, VEC_XOR);                   \
-    }                                                                                                                              \
-    attr static void obl_scal_##suffix(u8 *a, u8 u, unsigned k)                                                                    \
-    {                                                                                                                              \
-        obl_axiy_##suffix(a, a, u, k);                                                                                             \
+/* the operation flag is constant at each expansion */
+#define OBL_SIMPLE_LOOP(swap, T, LOAD, STORE, XOR)                           \
+    do {                                                                   \
+        unsigned i = 0, bulk = k - k % sizeof(T);                           \
+        for (; i < bulk; i += sizeof(T)) {                                 \
+            T av = LOAD((const T *)(a + i)), bv = LOAD((const T *)(b + i)); \
+            STORE((T *)(a + i), (swap) ? bv : XOR(av, bv));                 \
+            if (swap)                                                      \
+                STORE((T *)(b + i), av);                                   \
+        }                                                                  \
+        for (; i < k; i++) {                                               \
+            u8 av = a[i], bv = b[i];                                       \
+            a[i] = (swap) ? bv : av ^ bv;                                  \
+            if (swap)                                                      \
+                b[i] = av;                                                 \
+        }                                                                  \
+    } while (0)
+
+#define GENERATE_SWAP(suffix, attr, T, LOAD, STORE, XOR)                   \
+    attr static void obl_swap_##suffix(u8 *restrict a, u8 *restrict b, unsigned k) \
+    {                                                                     \
+        if (a == b || k == 0)                                              \
+            return;                                                       \
+        OBL_SIMPLE_LOOP(1, T, LOAD, STORE, XOR);                            \
+    }
+
+#define GENERATE_IMPL(suffix, attr, T, LOAD, STORE, INIT, CORE, XOR)         \
+    attr static void obl_axpy_##suffix(u8 *restrict a, u8 *restrict b, u8 u, unsigned k) \
+    {                                                                     \
+        if (u == 1) {                                                      \
+            OBL_SIMPLE_LOOP(0, T, LOAD, STORE, XOR);                        \
+        } else {                                                          \
+            OBL_SHUF_TEMPLATE(obl_axpy, a, b, XOR, T, LOAD, STORE, INIT, CORE, XOR); \
+        }                                                                 \
+    }                                                                     \
+    attr static void obl_axiy_##suffix(u8 *a, u8 *b, u8 u, unsigned k)        \
+    {                                                                     \
+        OBL_SHUF_TEMPLATE(obl_axiy, a, b, OBL_NOOP, T, LOAD, STORE, INIT, CORE, XOR); \
+    }                                                                     \
+    attr static void obl_scal_##suffix(u8 *a, u8 u, unsigned k)              \
+    {                                                                     \
+        obl_axiy_##suffix(a, a, u, k);                                     \
     }
 
 #if defined(OBLAS_ARCH_X86)
+
+GENERATE_SWAP(avx512, __attribute__((target("avx512f,avx512bw,avx512dq,avx512vl"))), __m512i, _mm512_loadu_si512,
+              _mm512_storeu_si512, _mm512_xor_si512)
 
 /* avx512 gfni */
 #define VEC_INIT_avx512_gfni() const __m512i u_mat = _mm512_set1_epi64(GF2_8_AFFINE_MAT[u])
@@ -178,6 +203,9 @@ GENERATE_IMPL(avx512_gfni, __attribute__((target("avx512f,avx512bw,avx512dq,avx5
 GENERATE_IMPL(avx512_std, __attribute__((target("avx512f,avx512bw,avx512dq,avx512vl"))), __m512i, _mm512_loadu_si512,
               _mm512_storeu_si512, VEC_INIT_avx512_std, VEC_CORE_avx512_std, _mm512_xor_si512)
 
+GENERATE_SWAP(avx2, __attribute__((target("avx2"))), __m256i, _mm256_loadu_si256,
+              _mm256_storeu_si256, _mm256_xor_si256)
+
 /* avx2 gnfi */
 #define VEC_INIT_avx2_gfni() const __m256i u_mat = _mm256_set1_epi64x(GF2_8_AFFINE_MAT[u])
 #define VEC_CORE_avx2_gfni(bx, res) __m256i res = _mm256_gf2p8affine_epi64_epi8(bx, u_mat, 0)
@@ -199,6 +227,9 @@ GENERATE_IMPL(avx2_gfni, __attribute__((target("avx2,gfni"))), __m256i, _mm256_l
     __m256i res = _mm256_xor_si256(lo_##res, hi_##res)
 GENERATE_IMPL(avx2_std, __attribute__((target("avx2"))), __m256i, _mm256_loadu_si256, _mm256_storeu_si256, VEC_INIT_avx2_std,
               VEC_CORE_avx2_std, _mm256_xor_si256)
+
+GENERATE_SWAP(ssse3, __attribute__((target("ssse3"))), __m128i, _mm_loadu_si128,
+              _mm_storeu_si128, _mm_xor_si128)
 
 /* sse3 gfni */
 #define VEC_INIT_ssse3_gfni() const __m128i u_mat = _mm_set1_epi64x(GF2_8_AFFINE_MAT[u])
@@ -319,6 +350,7 @@ static inline uint8x16_t vqtbl1q_u8(uint8x16_t tbl, uint8x16_t idx)
     uint8x16_t res = veorq_u8(lo_##res, hi_##res)
 #define VEC_LOAD_neon(ptr) vld1q_u8((const uint8_t *)(ptr))
 #define VEC_STORE_neon(ptr, val) vst1q_u8((uint8_t *)(ptr), val)
+GENERATE_SWAP(neon, , uint8x16_t, VEC_LOAD_neon, VEC_STORE_neon, veorq_u8)
 GENERATE_IMPL(neon, , uint8x16_t, VEC_LOAD_neon, VEC_STORE_neon, VEC_INIT_neon, VEC_CORE_neon, veorq_u8)
 
 static void obl_axpyb32_neon(u8 *a, u32 *b, u8 u, unsigned k)
@@ -352,6 +384,20 @@ static void obl_axpyb32_neon(u8 *a, u32 *b, u8 u, unsigned k)
 
 #if defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
 #include <riscv_vector.h>
+
+static void obl_swap_rvv(u8 *a, u8 *b, unsigned k)
+{
+    if (a == b || k == 0)
+        return;
+    for (unsigned i = 0; i < k;) {
+        size_t vl = __riscv_vsetvl_e8m1(k - i);
+        vuint8m1_t av = __riscv_vle8_v_u8m1(a + i, vl);
+        vuint8m1_t bv = __riscv_vle8_v_u8m1(b + i, vl);
+        __riscv_vse8_v_u8m1(a + i, bv, vl);
+        __riscv_vse8_v_u8m1(b + i, av, vl);
+        i += vl;
+    }
+}
 
 static void obl_axpy_rvv(u8 *a, u8 *b, u8 u, unsigned k)
 {
@@ -438,6 +484,12 @@ static void obl_scal_ref_wrapper(u8 *a, u8 u, unsigned k)
     obl_axiy_ref(a, a, u, k);
 }
 
+#define OBL_SET_IMPL(suffix, simd, b32, alignment)                        \
+    *impl = (struct oblas_impl){                                         \
+        .axpy = obl_axpy_##suffix, .scal = obl_scal_##suffix,              \
+        .axiy = obl_axiy_##suffix, .axpyb32 = obl_axpyb32_##b32,           \
+        .align_size = (alignment), .swap = obl_swap_##simd }
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4113)
@@ -454,6 +506,7 @@ void oblas_get_impl(struct oblas_impl *impl)
     impl->axiy = obl_axiy_ref;
     impl->axpyb32 = obl_axpyb32_ref;
     impl->align_size = sizeof(void *);
+    impl->swap = obl_swap;
 
 #if defined(OBLAS_ARCH_X86)
     int has_avx512 = __builtin_cpu_supports("avx512f") &&
@@ -461,54 +514,22 @@ void oblas_get_impl(struct oblas_impl *impl)
                      __builtin_cpu_supports("avx512dq") &&
                      __builtin_cpu_supports("avx512vl");
     if (has_avx512 && __builtin_cpu_supports("gfni")) {
-        impl->axpy = obl_axpy_avx512_gfni;
-        impl->scal = obl_scal_avx512_gfni;
-        impl->axiy = obl_axiy_avx512_gfni;
-        impl->axpyb32 = obl_axpyb32_avx512;
-        impl->align_size = 64;
+        OBL_SET_IMPL(avx512_gfni, avx512, avx512, 64);
     } else if (has_avx512) {
-        impl->axpy = obl_axpy_avx512_std;
-        impl->scal = obl_scal_avx512_std;
-        impl->axiy = obl_axiy_avx512_std;
-        impl->axpyb32 = obl_axpyb32_avx512;
-        impl->align_size = 64;
+        OBL_SET_IMPL(avx512_std, avx512, avx512, 64);
     } else if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("gfni")) {
-        impl->axpy = obl_axpy_avx2_gfni;
-        impl->scal = obl_scal_avx2_gfni;
-        impl->axiy = obl_axiy_avx2_gfni;
-        impl->axpyb32 = obl_axpyb32_avx2;
-        impl->align_size = 32;
+        OBL_SET_IMPL(avx2_gfni, avx2, avx2, 32);
     } else if (__builtin_cpu_supports("avx2")) {
-        impl->axpy = obl_axpy_avx2_std;
-        impl->scal = obl_scal_avx2_std;
-        impl->axiy = obl_axiy_avx2_std;
-        impl->axpyb32 = obl_axpyb32_avx2;
-        impl->align_size = 32;
+        OBL_SET_IMPL(avx2_std, avx2, avx2, 32);
     } else if (__builtin_cpu_supports("ssse3") && __builtin_cpu_supports("gfni")) {
-        impl->axpy = obl_axpy_ssse3_gfni;
-        impl->scal = obl_scal_ssse3_gfni;
-        impl->axiy = obl_axiy_ssse3_gfni;
-        impl->axpyb32 = obl_axpyb32_ssse3;
-        impl->align_size = 16;
+        OBL_SET_IMPL(ssse3_gfni, ssse3, ssse3, 16);
     } else if (__builtin_cpu_supports("ssse3")) {
-        impl->axpy = obl_axpy_ssse3_std;
-        impl->scal = obl_scal_ssse3_std;
-        impl->axiy = obl_axiy_ssse3_std;
-        impl->axpyb32 = obl_axpyb32_ssse3;
-        impl->align_size = 16;
+        OBL_SET_IMPL(ssse3_std, ssse3, ssse3, 16);
     }
 #elif defined(OBLAS_ARCH_ARM) && (defined(__ARM_NEON) || defined(_MSC_VER))
-    impl->axpy = obl_axpy_neon;
-    impl->scal = obl_scal_neon;
-    impl->axiy = obl_axiy_neon;
-    impl->axpyb32 = obl_axpyb32_neon;
-    impl->align_size = 16;
+    OBL_SET_IMPL(neon, neon, neon, 16);
 #elif defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
-    impl->axpy = obl_axpy_rvv;
-    impl->scal = obl_scal_rvv;
-    impl->axiy = obl_axiy_rvv;
-    impl->axpyb32 = obl_axpyb32_ref;
-    impl->align_size = 16;
+    OBL_SET_IMPL(rvv, rvv, ref, 16);
 #endif
 #ifdef _MSC_VER
 #pragma warning(pop)

@@ -14,8 +14,8 @@ typedef struct {
   uint8_t *end;
 } arena;
 
-static inline void *alloc(arena *a, ptrdiff_t size, ptrdiff_t align,
-                          ptrdiff_t count) {
+static inline void *alloc_uninit(arena *a, ptrdiff_t size, ptrdiff_t align,
+                                 ptrdiff_t count) {
   if (!a || !a->beg || !a->end || size <= 0 || count < 0)
     return 0;
   if (align < 1)
@@ -26,7 +26,13 @@ static inline void *alloc(arena *a, ptrdiff_t size, ptrdiff_t align,
     return 0;
   void *p = a->beg + padding;
   a->beg += padding + count * size;
-  return memset(p, 0, count * size);
+  return p;
+}
+
+static inline void *alloc(arena *a, ptrdiff_t size, ptrdiff_t align,
+                          ptrdiff_t count) {
+  void *p = alloc_uninit(a, size, align, count);
+  return p ? memset(p, 0, count * size) : 0;
 }
 
 #define alloc_array(a, type, count)                                            \

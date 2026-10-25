@@ -55,12 +55,13 @@ DECL_VEC(u8);
 
 bool u8_vec_init(u8_vec *v, arena *a, u32 n, u32 m, u32 s);
 bool u32_vec_init(u32_vec *v, arena *a, u32 n, u32 m, u32 s);
+/* empty sparse vector; initialized on push */
+bool u32_vec_reserve(u32_vec *v, arena *a, u32 m);
 
-#if !defined(NDEBUG)
-#define bm_at(v, i, j) bm_get(v, i, j)
-#else
-#define bm_at(v, i, j) (((v)->a[(i) * (v)->s + ((j) / 32)] >> ((j) % 32)) & 1)
-#endif
+/* inline bitmap access without debug checks */
+static inline u8 bm_at(u32_vec *v, u32 i, u32 j) {
+  return (v->a[i * v->s + j / 32] >> (j % 32)) & 1;
+}
 
 u8 bm_get(u32_vec *v, u32 i, u32 j);
 void bm_set(u32_vec *v, u32 i, u32 j);

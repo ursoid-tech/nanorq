@@ -5,6 +5,24 @@
 #include <string.h>
 #include <unistd.h>
 
+/* compile high-level code directly to inject scratch allocation faults */
+static unsigned alloc_fail_at, alloc_calls;
+static void *api_test_malloc(size_t bytes) {
+  if (alloc_fail_at && ++alloc_calls == alloc_fail_at)
+    return NULL;
+  return malloc(bytes);
+}
+static void *api_test_realloc(void *ptr, size_t bytes) {
+  if (alloc_fail_at && ++alloc_calls == alloc_fail_at)
+    return NULL;
+  return realloc(ptr, bytes);
+}
+#define malloc api_test_malloc
+#define realloc api_test_realloc
+#include "../../lib/nanorq.c"
+#undef malloc
+#undef realloc
+
 #define CHECK(cond, msg)                                                       \
   do {                                                                         \
     if (!(cond)) {                                                             \
@@ -199,6 +217,201 @@ static bool conventional_repair_can_retry(void) {
   return true;
 }
 
+/* test matrix growth, reuse, and shrink across resets */
+static bool repair_capacity_survives_reset(void) {
+  enum { K = 10, T = 19, BYTES = K * T - 3 };
+  const unsigned overheads[] = {0, 5, 1, 8, 0, 4};
+  uint8_t source[BYTES] = {0}, decoded[BYTES], packet[T];
+  struct ioctx *src_io = ioctx_from_mem_ro(source, sizeof(source));
+  struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
+  nanorq *enc = nanorq_encoder_new_ex(sizeof(source), T, K, 1, 1);
+  CHECK(src_io && dec_io && enc, "capacity encoder setup");
+  nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
+                                   nanorq_oti_scheme_specific(enc));
+  CHECK(dec, "capacity decoder setup");
+  for (unsigned trial = 0; trial < sizeof(overheads) / sizeof(*overheads);
+       trial++) {
+    for (size_t i = 0; i < sizeof(source); i++)
+      source[i] = (uint8_t)(i * 29U + trial * 37U + 7U);
+    memset(decoded, 0xa5, sizeof(decoded));
+    CHECK(nanorq_generate_symbols(enc, 0, src_io), "load partial source block");
+    for (unsigned esi = 1; esi < K + 1 + overheads[trial]; esi++) {
+      memset(packet, 0xa5, sizeof(packet));
+      CHECK(nanorq_encode(enc, packet, esi, 0, src_io) == T,
+            "generate capacity symbol");
+      CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, esi),
+                                      dec_io) == NANORQ_SYM_ADDED,
+            "add capacity symbol");
+    }
+    CHECK(nanorq_repair_block(dec, dec_io, 0), "repair after capacity change");
+    CHECK(memcmp(source, decoded, sizeof(source)) == 0,
+          "capacity reuse must preserve recovered bytes");
+    nanorq_encoder_reset(enc, 0);
+    nanorq_encoder_reset(dec, 0);
+  }
+  nanorq_free(dec);
+  nanorq_free(enc);
+  dec_io->destroy(dec_io);
+  src_io->destroy(src_io);
+  return true;
+}
+
+static bool rank_failure_can_retry_after_growth(void) {
+  enum { K = 10, T = 8 };
+  uint8_t source[K * T] = {0}, decoded[K * T], packet[T];
+  struct ioctx *src_io = ioctx_from_mem_ro(source, sizeof(source));
+  struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
+  nanorq *enc = nanorq_encoder_new_ex(sizeof(source), T, K, 1, 1);
+  CHECK(src_io && dec_io && enc, "rank retry encoder setup");
+  nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
+                                   nanorq_oti_scheme_specific(enc));
+  CHECK(dec, "rank retry decoder setup");
+  for (unsigned trial = 0; trial < 2; trial++) {
+    for (size_t i = 0; i < sizeof(source); i++)
+      source[i] = (uint8_t)(i * 17U + trial * 37U + 3U);
+    memset(decoded, 0, sizeof(decoded));
+    for (unsigned esi = 1; esi < K; esi++)
+      CHECK(nanorq_decoder_add_symbol(dec, source + esi * T, nanorq_tag(0, esi),
+                                      dec_io) == NANORQ_SYM_ADDED,
+            "add known symbols before rank failure");
+    /* ESI 142 with source ESIs 1..9 is rank deficient for K=10 */
+    CHECK(nanorq_encode(enc, packet, 142, 0, src_io) == T,
+          "generate deficient equation");
+    CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, 142), dec_io) ==
+              NANORQ_SYM_ADDED,
+          "add deficient equation");
+    for (unsigned retry = 0; retry < 2; retry++) {
+      CHECK(!nanorq_repair_block(dec, dec_io, 0), "report deficient rank");
+      CHECK(nanorq_num_missing(dec, 0) == 1, "preserve missing state");
+      CHECK(memcmp(source + T, decoded + T, sizeof(source) - T) == 0,
+            "rank failure must preserve known symbols");
+    }
+    CHECK(nanorq_encode(enc, packet, K, 0, src_io) == T,
+          "generate independent equation");
+    CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, K), dec_io) ==
+              NANORQ_SYM_ADDED,
+          "add independent equation");
+    CHECK(nanorq_repair_block(dec, dec_io, 0),
+          "retry with additional equation");
+    CHECK(memcmp(source, decoded, sizeof(source)) == 0,
+          "rank retry must recover original bytes");
+    nanorq_encoder_reset(enc, 0);
+    nanorq_encoder_reset(dec, 0);
+  }
+  nanorq_free(dec);
+  nanorq_free(enc);
+  dec_io->destroy(dec_io);
+  src_io->destroy(src_io);
+  return true;
+}
+
+static bool unequal_blocks_use_contiguous_io(void) {
+  enum { T = 19, BYTES = 11 * T - 3 };
+  uint8_t source[BYTES], decoded[BYTES] = {0}, packet[T];
+  for (size_t i = 0; i < sizeof(source); i++)
+    source[i] = (uint8_t)(i * 19U + 11U);
+  struct ioctx *src_io = ioctx_from_mem_ro(source, sizeof(source));
+  struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
+  nanorq *enc = nanorq_encoder_new_ex(sizeof(source), T, 6, 2, 1);
+  CHECK(src_io && dec_io && enc && nanorq_blocks(enc) == 2,
+        "unequal blocks encoder setup");
+  nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
+                                   nanorq_oti_scheme_specific(enc));
+  CHECK(dec, "unequal blocks decoder setup");
+  for (unsigned sbn = 0; sbn < 2; sbn++) {
+    unsigned K = nanorq_block_symbols(enc, sbn);
+    CHECK(K == (sbn == 0 ? 6 : 5), "unequal block dimensions");
+    CHECK(nanorq_generate_symbols(enc, sbn, src_io),
+          "load unequal source block");
+    for (unsigned esi = 1; esi < K + 3; esi++) {
+      CHECK(nanorq_encode(enc, packet, esi, sbn, src_io) == T,
+            "encode unequal block symbol");
+      CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(sbn, esi),
+                                      dec_io) == NANORQ_SYM_ADDED,
+            "add unequal block symbol");
+    }
+    CHECK(nanorq_repair_block(dec, dec_io, sbn), "repair unequal block");
+  }
+  CHECK(memcmp(source, decoded, sizeof(source)) == 0,
+        "unequal partial blocks must match source");
+  nanorq_free(dec);
+  nanorq_free(enc);
+  dec_io->destroy(dec_io);
+  src_io->destroy(src_io);
+  return true;
+}
+
+static bool scratch_allocation_failures_can_retry(void) {
+  enum { K = 10, T = 8 };
+  uint8_t source[K * T], decoded[K * T], packet[T];
+  for (size_t i = 0; i < sizeof(source); i++)
+    source[i] = (uint8_t)(i * 17U + 3U);
+  struct ioctx *src_io = ioctx_from_mem_ro(source, sizeof(source));
+  struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
+  nanorq *enc = nanorq_encoder_new_ex(sizeof(source), T, K, 1, 1);
+  CHECK(src_io && dec_io && enc, "allocation retry encoder setup");
+  CHECK(nanorq_encode(enc, packet, K, 0, src_io) == T,
+        "generate allocation retry equation");
+  for (unsigned failure = 1; failure <= 4; failure++) {
+    memset(decoded, 0, sizeof(decoded));
+    nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
+                                     nanorq_oti_scheme_specific(enc));
+    CHECK(dec, "allocation retry decoder setup");
+    for (unsigned esi = 1; esi < K; esi++)
+      CHECK(nanorq_decoder_add_symbol(dec, source + esi * T, nanorq_tag(0, esi),
+                                      dec_io) == NANORQ_SYM_ADDED,
+            "add allocation retry source");
+    CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, K), dec_io) ==
+              NANORQ_SYM_ADDED,
+          "add allocation retry equation");
+    alloc_calls = 0;
+    alloc_fail_at = failure;
+    bool repaired = nanorq_repair_block(dec, dec_io, 0);
+    alloc_fail_at = 0;
+    CHECK(alloc_calls == failure && !repaired,
+          "report scratch allocation failure");
+    CHECK(nanorq_num_missing(dec, 0) == 1, "allocation failure preserves gaps");
+    CHECK(memcmp(source + T, decoded + T, sizeof(source) - T) == 0,
+          "allocation failure preserves known data");
+    CHECK(nanorq_repair_block(dec, dec_io, 0),
+          "retry after allocation failure");
+    CHECK(memcmp(source, decoded, sizeof(source)) == 0,
+          "allocation retry recovers original bytes");
+    if (failure == 1) {
+      /* fail realloc of scratch buffer after D growth */
+      uint8_t extra[T];
+      nanorq_encoder_reset(dec, 0);
+      memset(decoded, 0, sizeof(decoded));
+      for (unsigned esi = 1; esi < K; esi++)
+        CHECK(nanorq_decoder_add_symbol(dec, source + esi * T,
+                                        nanorq_tag(0, esi),
+                                        dec_io) == NANORQ_SYM_ADDED,
+              "add source before scratch growth");
+      for (unsigned esi = K; esi < K + 9; esi++) {
+        CHECK(nanorq_encode(enc, extra, esi, 0, src_io) == T,
+              "generate scratch growth equation");
+        CHECK(nanorq_decoder_add_symbol(dec, extra, nanorq_tag(0, esi),
+                                        dec_io) == NANORQ_SYM_ADDED,
+              "add scratch growth equation");
+      }
+      alloc_calls = 0;
+      alloc_fail_at = 1;
+      repaired = nanorq_repair_block(dec, dec_io, 0);
+      alloc_fail_at = 0;
+      CHECK(!repaired && alloc_calls == 1, "report scratch growth failure");
+      CHECK(nanorq_num_missing(dec, 0) == 1, "scratch growth preserves gaps");
+      CHECK(nanorq_repair_block(dec, dec_io, 0), "retry failed scratch growth");
+      CHECK(memcmp(source, decoded, sizeof(source)) == 0,
+            "scratch growth retry recovers original bytes");
+    }
+    nanorq_free(dec);
+  }
+  nanorq_free(enc);
+  dec_io->destroy(dec_io);
+  src_io->destroy(src_io);
+  return true;
+}
+
 static bool mmap_tracks_logical_size(void) {
   char path[] = "/tmp/nanorq-io-XXXXXX";
   int fd = mkstemp(path);
@@ -235,6 +448,11 @@ int main(void) {
   CHECK(hybrid_repair_uses_known_symbols(), "hybrid repair regression");
   CHECK(output_failure_is_reported(), "output failure regression");
   CHECK(conventional_repair_can_retry(), "repair retry regression");
+  CHECK(repair_capacity_survives_reset(), "capacity reset regression");
+  CHECK(rank_failure_can_retry_after_growth(), "rank retry regression");
+  CHECK(unequal_blocks_use_contiguous_io(), "unequal direct I/O regression");
+  CHECK(scratch_allocation_failures_can_retry(),
+        "scratch allocation retry regression");
   CHECK(mmap_tracks_logical_size(), "mmap logical size regression");
   puts("all API regressions passed");
   return EXIT_SUCCESS;

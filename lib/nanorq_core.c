@@ -65,6 +65,7 @@ bool nanorq_core_encoder_new(u32 K, u32 overhead, nanorq_core *rq) {
   if (rows * u_stride > UINT32_MAX)
     return false;
   rq->overhead = overhead;
+  rq->W.u = 0; /* active width unset until prepare or patch */
   nanorq_core_init();
   return true;
 }
@@ -165,10 +166,10 @@ static bool assign_prepare_memory(nanorq_core *rq, u8 *mem, size_t len) {
   if (!W->A)
     return false;
   for (u32 i = 0; i < P->S; i++)
-    if (!u32_vec_init(&W->A[i], a, 0, snz, 0))
+    if (!u32_vec_reserve(&W->A[i], a, snz))
       return false;
   for (u32 i = P->S + P->H, esi = 0; i < W->rows; i++, esi++)
-    if (!u32_vec_init(&W->A[i], a, 0, GENC_MAX, 0))
+    if (!u32_vec_reserve(&W->A[i], a, GENC_MAX))
       return false;
 
   W->AT = alloc_array(a, u32_vec, W->cols);
@@ -184,12 +185,19 @@ static bool assign_prepare_memory(nanorq_core *rq, u8 *mem, size_t len) {
   return true;
 }
 
-bool nanorq_core_prepare(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len) {
+bool nanorq_core_generate(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len) {
   if (!rq || !prep_mem || pm_len == 0)
     return false;
+  rq->W.u = 0;
   if (!assign_prepare_memory(rq, prep_mem, pm_len))
     return false;
   precode_matrix_gen(&rq->P, &rq->W);
+  return true;
+}
+
+bool nanorq_core_prepare(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len) {
+  if (!nanorq_core_generate(rq, prep_mem, pm_len))
+    return false;
   return precode_matrix_prepare(&rq->P, &rq->W);
 }
 
@@ -225,6 +233,7 @@ void nanorq_core_replace_symbol(nanorq_core *rq, u32 row, u32 esi) {
       return;
     X += (P->Kprime - P->K);
   }
+  W->u = 0;
   uv_clear(W->A[row]);
   params_set_idxs(P, X, &W->A[row]);
 }
@@ -248,12 +257,11 @@ bool nanorq_core_patch_matrix(nanorq_core *rq) {
   return precode_matrix_prepare(&rq->P, W);
 }
 
-size_t nanorq_core_calculate_work_memory(nanorq_core *rq) {
+static size_t calculate_work_memory(nanorq_core *rq, u32 max_u) {
   if (!rq)
     return 0;
   params *P = &rq->P;
   size_t mem = 0;
-  u32 max_u = P->L;
   u32 rows = P->L + rq->overhead;
   /* U */
   u32 u_stride = DC(max_u, 32);
@@ -272,6 +280,16 @@ size_t nanorq_core_calculate_work_memory(nanorq_core *rq) {
   if (!add_padded_bytes(&mem, P->Kprime + P->S, 1, 1))
     return 0;
   return (size_t)mem;
+}
+
+size_t nanorq_core_calculate_work_memory(nanorq_core *rq) {
+  return rq ? calculate_work_memory(rq, rq->P.L) : 0;
+}
+
+size_t nanorq_core_calculate_prepared_work_memory(nanorq_core *rq) {
+  if (!rq || rq->W.u == 0 || rq->W.u > rq->P.L)
+    return 0;
+  return calculate_work_memory(rq, rq->W.u);
 }
 
 static bool assign_work_memory(nanorq_core *rq, u8 *mem, size_t len) {

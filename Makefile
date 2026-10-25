@@ -18,15 +18,20 @@ lib/nanorq.o\
 $(CORE_OBJ)
 
 
-TEST_UTILS=\
+CORE_TEST_UTILS=\
 t/00util/matgen\
 t/00util/repgen\
 t/00util/hdpcgen\
 t/00util/precond\
 t/00util/ult\
-t/00util/schedgen\
+t/00util/schedgen
+
+TEST_UTILS=\
+$(CORE_TEST_UTILS)\
 t/00util/test_utils\
-t/00util/api_regress
+t/00util/api_regress\
+t/00util/test_oblas_swap\
+t/00util/test_oblas_kernels
 
 EXAMPLES=\
 examples/encode\
@@ -53,6 +58,8 @@ benchmark: benchmark.o $(OBJ)
 
 benchmark_core: benchmark_core.o $(CORE_OBJ)
 
+$(CORE_OBJ) lib/nanorq.o t/00util/test_oblas_kernels.o: deps/obl/oblas_lite.h
+
 t/00util/matgen: t/00util/matgen.o $(CORE_OBJ)
 t/00util/repgen: t/00util/repgen.o $(CORE_OBJ)
 t/00util/hdpcgen: t/00util/hdpcgen.o $(CORE_OBJ)
@@ -60,7 +67,11 @@ t/00util/precond: t/00util/precond.o $(CORE_OBJ)
 t/00util/ult: t/00util/ult.o $(CORE_OBJ)
 t/00util/schedgen: t/00util/schedgen.o $(CORE_OBJ)
 t/00util/test_utils: t/00util/test_utils.o $(CORE_OBJ)
-t/00util/api_regress: t/00util/api_regress.o $(OBJ)
+t/00util/api_regress.o: lib/nanorq.c
+t/00util/api_regress: t/00util/api_regress.o lib/io.o $(CORE_OBJ)
+t/00util/test_oblas_swap: t/00util/test_oblas_swap.o deps/obl/oblas_common.o
+t/00util/test_oblas_kernels.o: deps/obl/oblas_lite.c
+t/00util/test_oblas_kernels: t/00util/test_oblas_kernels.o deps/obl/oblas_common.o
 
 examples/encode: examples/encode.o $(OBJ)
 examples/decode: examples/decode.o $(OBJ)
@@ -74,7 +85,7 @@ check: clean $(TEST_UTILS) $(EXAMPLES)
 
 check-nolibc: clean
 	$(MAKE) libnanorq_core.a CPPFLAGS="$(CPPFLAGS) -DNANORQ_NO_LIBC"
-	$(MAKE) $(TEST_UTILS)
+	$(MAKE) $(CORE_TEST_UTILS)
 	prove -I. -v t/10pcmat.t t/20repmat.t t/30precond.t t/35ult.t t/40hdpc.t t/50schedules.t
 
 libnanorq.a: $(OBJ)

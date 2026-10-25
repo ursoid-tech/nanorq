@@ -45,11 +45,12 @@ static void ops_apply_schedule(uint8_t *D, uint32_t stride, schedule *S) {
 }
 
 static void ops_permute(uint8_t *D, uint32_t stride, u32 P[], u32 n) {
+  void (*swap)(uint8_t *, uint8_t *, unsigned) = nanorq_oblas.swap;
   for (size_t i = 0; i < n; i++) {
     u32 at = i;
     while (!(P[at] & 0x80000000)) {
       u32 next = P[at];
-      obl_swap((D + i * stride), (D + next * stride), stride);
+      swap((D + i * stride), (D + next * stride), stride);
       P[at] |= 0x80000000;
       at = next;
     }

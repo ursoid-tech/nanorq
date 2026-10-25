@@ -17,6 +17,7 @@ struct oblas_impl {
     void (*axiy)(uint8_t *a, uint8_t *b, uint8_t u, unsigned k);
     void (*axpyb32)(uint8_t *a, uint32_t *b, uint8_t u, unsigned k);
     size_t align_size;
+    void (*swap)(uint8_t *a, uint8_t *b, unsigned k);
 };
 
 void oblas_get_impl(struct oblas_impl *impl);
