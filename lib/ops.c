@@ -99,11 +99,16 @@ void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
   uint32_t mix[GENC_MAX];
   uint32_t num = nanorq_core_get_packet_mix(rq, esi, mix, GENC_MAX);
 
-  for (u32 i = 0; i < stride; i++)
-    ptr[i] = 0;
-  for (u32 it = 0; it < num; it++) {
+  if (num == 0) {
+    memset(ptr, 0, stride);
+    return;
+  }
+  const uint8_t *first = D + (size_t)mix[0] * stride;
+  if (ptr != first)
+    memcpy(ptr, first, stride);
+  for (u32 it = 1; it < num; it++) {
     u32 row = mix[it];
-    nanorq_oblas.axpy(ptr, (D + row * stride), 1, stride);
+    nanorq_oblas.axpy(ptr, (D + (size_t)row * stride), 1, stride);
   }
 }
 
