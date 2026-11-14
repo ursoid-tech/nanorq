@@ -604,6 +604,12 @@ static bool ensure_block_matrix(struct block_encoder *enc) {
   return true;
 }
 
+static bool ensure_mix_buf(struct block_encoder *enc) {
+  if (!enc->mix_buf)
+    enc->mix_buf = (uint8_t *)malloc(enc->stride);
+  return enc->mix_buf != NULL;
+}
+
 bool nanorq_generate_symbols(nanorq *rq, uint8_t sbn, struct ioctx *io) {
   if (!rq || !io)
     return false;
@@ -669,40 +675,23 @@ size_t nanorq_encode(nanorq *rq, void *data, uint32_t esi, uint8_t sbn,
   if (enc == NULL)
     return 0;
 
-  if (esi < enc->K) {
-    if (enc->inverted) {
-      if (!enc->mix_buf)
-        enc->mix_buf =
-            (uint8_t *)obl_alloc(1, enc->stride, nanorq_oblas.align_size);
-      if (!enc->mix_buf)
-        return 0;
-      ops_mix(&enc->core, enc->D, enc->stride, esi, enc->mix_buf);
-      memcpy(data, enc->mix_buf, rq->common.T);
-      return rq->common.T;
-    } else {
-      memset(data, 0, rq->common.T);
-      if (transfer_esi(rq, sbn, esi, enc->K, (uint8_t *)data, rq->common.T, io,
-                       0) == SIZE_MAX)
-        return 0;
-      return rq->common.T;
-    }
-  } else {
-    if (esi > ((1 << 24) - 1))
+  if (esi < enc->K && !enc->inverted) {
+    memset(data, 0, rq->common.T);
+    if (transfer_esi(rq, sbn, esi, enc->K, (uint8_t *)data, rq->common.T, io,
+                     0) == SIZE_MAX)
       return 0;
-    if (!enc->inverted) {
-      if (!nanorq_generate_symbols(rq, sbn, io)) {
-        return 0;
-      }
-    }
-    if (!enc->mix_buf)
-      enc->mix_buf =
-          (uint8_t *)obl_alloc(1, enc->stride, nanorq_oblas.align_size);
-    if (!enc->mix_buf)
-      return 0;
-    ops_mix(&enc->core, enc->D, enc->stride, esi, enc->mix_buf);
-    memcpy(data, enc->mix_buf, rq->common.T);
     return rq->common.T;
   }
+
+  if (esi > ((1 << 24) - 1))
+    return 0;
+  if (!enc->inverted && !nanorq_generate_symbols(rq, sbn, io))
+    return 0;
+  if (!ensure_mix_buf(enc))
+    return 0;
+  ops_mix(&enc->core, enc->D, enc->stride, esi, enc->mix_buf);
+  memcpy(data, enc->mix_buf, rq->common.T);
+  return rq->common.T;
 }
 
 void nanorq_encoder_cleanup(nanorq *rq, uint8_t sbn) {
@@ -714,7 +703,7 @@ void nanorq_encoder_cleanup(nanorq *rq, uint8_t sbn) {
   if (enc->D) {
     obl_free(enc->D);
   }
-  obl_free(enc->mix_buf);
+  free(enc->mix_buf);
   if (enc->prep_mem) {
     free(enc->prep_mem);
   }
@@ -1109,13 +1098,12 @@ out:
 }
 
 static bool write_recovered_block(nanorq *rq, struct block_encoder *dec,
-                                  uint8_t sbn, struct ioctx *io,
-                                  uint8_t *recovered) {
+                                  uint8_t sbn, struct ioctx *io) {
   for (uint32_t gap = 0; gap < dec->K; gap++) {
     if (compat_bitmask_check(&dec->repair_mask, gap))
       continue;
-    ops_mix(&dec->core, dec->D, dec->stride, gap, recovered);
-    if (transfer_esi(rq, sbn, gap, dec->K, recovered, rq->common.T, io, 1) ==
+    ops_mix(&dec->core, dec->D, dec->stride, gap, dec->mix_buf);
+    if (transfer_esi(rq, sbn, gap, dec->K, dec->mix_buf, rq->common.T, io, 1) ==
         SIZE_MAX)
       return false;
   }
@@ -1147,12 +1135,9 @@ bool nanorq_repair_block(nanorq *rq, struct ioctx *io, uint8_t sbn) {
   if (num_gaps == 0)
     return true;
   if (dec->inverted) {
-    uint8_t *recovered = (uint8_t *)malloc(dec->stride);
-    if (!recovered)
+    if (!ensure_mix_buf(dec))
       return false;
-    bool success = write_recovered_block(rq, dec, sbn, io, recovered);
-    free(recovered);
-    return success;
+    return write_recovered_block(rq, dec, sbn, io);
   }
   if (recoded_count >= num_gaps &&
       nanorq_repair_block_recoded(rq, dec, sbn, io))
@@ -1163,7 +1148,6 @@ bool nanorq_repair_block(nanorq *rq, struct ioctx *io, uint8_t sbn) {
 
   uint32_t overhead = (uint32_t)(conventional_count - num_gaps);
   nanorq_core core = {0};
-  uint8_t *recovered = NULL;
   bool matrix_modified = false;
   bool success = false;
 
@@ -1225,8 +1209,7 @@ bool nanorq_repair_block(nanorq *rq, struct ioctx *io, uint8_t sbn) {
   if (!nanorq_core_patch_matrix(&core))
     goto out;
   size_t work_len = nanorq_core_calculate_prepared_work_memory(&core);
-  recovered = (uint8_t *)malloc(dec->stride);
-  if (!recovered ||
+  if (!ensure_mix_buf(dec) ||
       !reserve_scratch(&dec->work_mem, &dec->work_len, work_len) ||
       !reset_schedule(&dec->S, dec->K))
     goto out;
@@ -1238,7 +1221,7 @@ bool nanorq_repair_block(nanorq *rq, struct ioctx *io, uint8_t sbn) {
   dec->core = core;
   ops_run(&dec->core, dec->D, dec->stride, &dec->S);
   dec->inverted = true;
-  success = write_recovered_block(rq, dec, sbn, io, recovered);
+  success = write_recovered_block(rq, dec, sbn, io);
 
 out:
   if (matrix_modified && !dec->inverted) {
@@ -1252,6 +1235,5 @@ out:
                                         core.P.Kprime + extra),
              0, dec->stride);
   }
-  free(recovered);
   return success;
 }

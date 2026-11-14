@@ -350,6 +350,14 @@ static bool scratch_allocation_failures_can_retry(void) {
   struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
   nanorq *enc = nanorq_encoder_new_ex(sizeof(source), T, K, 1, 1);
   CHECK(src_io && dec_io && enc, "allocation retry encoder setup");
+  CHECK(nanorq_generate_symbols(enc, 0, src_io),
+        "prepare encoder before mix_buf failure");
+  alloc_calls = 0;
+  alloc_fail_at = 1;
+  CHECK(nanorq_encode(enc, packet, K, 0, src_io) == 0,
+        "report mix_buf allocation failure");
+  alloc_fail_at = 0;
+  CHECK(alloc_calls == 1, "encode mix_buf uses malloc");
   CHECK(nanorq_encode(enc, packet, K, 0, src_io) == T,
         "generate allocation retry equation");
   for (unsigned failure = 1; failure <= 4; failure++) {
