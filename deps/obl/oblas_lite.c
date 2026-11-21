@@ -89,7 +89,7 @@ static void obl_axiy_ref(u8 *a, u8 *b, u8 u, unsigned k)
 }
 #endif
 
-static void obl_scal_ref_wrapper(u8 *a, u8 u, unsigned k)
+static void obl_scal_ref(u8 *a, u8 u, unsigned k)
 {
     obl_axiy_ref(a, a, u, k);
 }
@@ -164,77 +164,32 @@ static inline void obl_prefetch_row_w(const u8 *p, unsigned k)
 #endif
 }
 
-#define OBL_ROW_OPS(suffix, attr, AXPY, SCAL, AXPY2, AXPY4)                           \
-    attr OBL_INLINE void obl_replay_##suffix(u8 *D, unsigned stride,                  \
-                                            const struct oblas_row_op *ops,           \
-                                            size_t count, int step)                   \
-    {                                                                                 \
-        size_t left = count;                                                          \
-        while (left) {                                                                \
-            const struct oblas_row_op *op = ops + (step > 0 ? count - left : left - 1);\
-            if (left > 8)                                                             \
-                obl_prefetch_row_w(D + (size_t)op[8 * step].i * stride, stride);      \
-            u8 *dst = D + (size_t)op->i * stride;                                     \
-            u32 j = op->j;                                                            \
-            if (!op->u) {                                                             \
-                SCAL(dst, (u8)j, stride);                                             \
-                left--;                                                               \
-            } else if (op->i == j) {                                                  \
-                SCAL(dst, (u8)(1 ^ op->u), stride);                                   \
-                left--;                                                               \
-            } else if (left >= 2 && op[step].u && op[step].j == j) {                  \
-                u8 *src = D + (size_t)j * stride;                                     \
-                u8 *d1 = D + (size_t)op[step].i * stride;                             \
-                /* Only the last destination may overwrite the shared source. */      \
-                if (left >= 4 && op[step].i != j && op[2 * step].u &&                 \
-                    op[2 * step].j == j && op[2 * step].i != j &&                     \
-                    op[3 * step].u && op[3 * step].j == j) {                          \
-                    AXPY4(dst, d1, D + (size_t)op[2 * step].i * stride,               \
-                          D + (size_t)op[3 * step].i * stride, src, op->u,            \
-                          op[step].u, op[2 * step].u, op[3 * step].u, stride);        \
-                    left -= 4;                                                        \
-                } else {                                                              \
-                    AXPY2(dst, d1, src, op->u, op[step].u, stride);                   \
-                    left -= 2;                                                        \
-                }                                                                     \
-            } else {                                                                  \
-                AXPY(dst, D + (size_t)j * stride, op->u, stride);                     \
-                left--;                                                               \
-            }                                                                         \
-        }                                                                             \
-    }                                                                                 \
-    attr static void obl_row_ops_##suffix(u8 *D, unsigned stride,                     \
-                                          const struct oblas_row_op *ops,             \
-                                          size_t count, int reverse)                  \
-    {                                                                                 \
-        if (reverse)                                                                  \
-            obl_replay_##suffix(D, stride, ops, count, -1);                           \
-        else                                                                          \
-            obl_replay_##suffix(D, stride, ops, count, 1);                            \
-    }
+#define OBL_ROW_AT(matrix, index, stride) ((matrix) + (size_t)(index) * (stride))
 
-OBL_ROW_OPS(ref, , obl_axpy_ref, obl_scal_ref_wrapper, obl_axpy2_ref, obl_axpy4_ref)
+#define OBL_KERNEL(name) obl_##name##_ref
+#define OBL_TARGET
+#include "oblas_rows.inc"
 
 #define OBL_NOOP(a, b) (b)
 
-#define OBL_SHUF_TEMPLATE(op, a, b, f, suffix, T, LOAD, STORE, XOR)                  \
+#define OBL_SHUF_TEMPLATE(op, a, b, f, T, LOAD, STORE)                               \
     do {                                                                             \
-        VEC_MASK_##suffix();                                                         \
-        VEC_COEF_##suffix(0, u);                                                     \
+        VEC_MASK();                                                                  \
+        VEC_COEF(0, u);                                                              \
         T *ap = (T *)a;                                                              \
         T *ae = (T *)(a + k - (k % (4 * sizeof(T))));                                \
         const T *bp = (const T *)b;                                                  \
         for (; ap < ae; ap += 4, bp += 4) {                                          \
             T bx0 = LOAD(bp + 0), bx1 = LOAD(bp + 1);                                \
             T bx2 = LOAD(bp + 2), bx3 = LOAD(bp + 3);                                \
-            VEC_SPLIT_##suffix(bx0, 0);                                              \
-            VEC_SPLIT_##suffix(bx1, 1);                                              \
-            VEC_SPLIT_##suffix(bx2, 2);                                              \
-            VEC_SPLIT_##suffix(bx3, 3);                                              \
-            T prod0 = VEC_MUL_##suffix(0, bx0, 0);                                   \
-            T prod1 = VEC_MUL_##suffix(0, bx1, 1);                                   \
-            T prod2 = VEC_MUL_##suffix(0, bx2, 2);                                   \
-            T prod3 = VEC_MUL_##suffix(0, bx3, 3);                                   \
+            VEC_SPLIT(bx0, 0);                                                       \
+            VEC_SPLIT(bx1, 1);                                                       \
+            VEC_SPLIT(bx2, 2);                                                       \
+            VEC_SPLIT(bx3, 3);                                                       \
+            T prod0 = VEC_MUL(0, bx0, 0);                                            \
+            T prod1 = VEC_MUL(0, bx1, 1);                                            \
+            T prod2 = VEC_MUL(0, bx2, 2);                                            \
+            T prod3 = VEC_MUL(0, bx3, 3);                                            \
             STORE(ap + 0, f(LOAD(ap + 0), prod0));                                   \
             STORE(ap + 1, f(LOAD(ap + 1), prod1));                                   \
             STORE(ap + 2, f(LOAD(ap + 2), prod2));                                   \
@@ -243,8 +198,8 @@ OBL_ROW_OPS(ref, , obl_axpy_ref, obl_scal_ref_wrapper, obl_axpy2_ref, obl_axpy4_
         T *ae2 = (T *)(a + k - (k % sizeof(T)));                                     \
         for (; ap < ae2; ap++, bp++) {                                               \
             T bx = LOAD(bp);                                                         \
-            VEC_SPLIT_##suffix(bx, 0);                                               \
-            T prod = VEC_MUL_##suffix(0, bx, 0);                                     \
+            VEC_SPLIT(bx, 0);                                                        \
+            T prod = VEC_MUL(0, bx, 0);                                              \
             STORE(ap, f(LOAD(ap), prod));                                            \
         }                                                                            \
         op##_ref((u8 *)ap, (u8 *)bp, u, k % sizeof(T));                              \
@@ -284,6 +239,14 @@ OBL_ROW_OPS(ref, , obl_axpy_ref, obl_scal_ref_wrapper, obl_axpy2_ref, obl_axpy4_
     } while (0)
 
 #define GENERATE_VEC_OPS(simd, attr, T, LOAD, STORE, XOR)                            \
+    attr OBL_INLINE T obl_load_##simd(const u8 *src)                                 \
+    {                                                                                \
+        return LOAD((const T *)src);                                                 \
+    }                                                                                \
+    attr OBL_INLINE void obl_xor_into_##simd(u8 *dst, T value)                       \
+    {                                                                                \
+        STORE((T *)dst, XOR(LOAD((const T *)dst), value));                           \
+    }                                                                                \
     attr static void obl_swap_##simd(u8 *restrict a, u8 *restrict b, unsigned k)     \
     {                                                                                \
         if (a == b || k == 0)                                                        \
@@ -308,91 +271,17 @@ OBL_ROW_OPS(ref, , obl_axpy_ref, obl_scal_ref_wrapper, obl_axpy2_ref, obl_axpy4_
         if (u == 1) {                                                                \
             OBL_SIMPLE_LOOP(0, T, LOAD, STORE, XOR);                                 \
         } else {                                                                     \
-            OBL_SHUF_TEMPLATE(obl_axpy, a, b, XOR, suffix, T, LOAD, STORE, XOR);     \
+            OBL_SHUF_TEMPLATE(obl_axpy, a, b, XOR, T, LOAD, STORE);                  \
         }                                                                            \
     }                                                                                \
     attr static void obl_axiy_##suffix(u8 *a, u8 *b, u8 u, unsigned k)               \
     {                                                                                \
-        OBL_SHUF_TEMPLATE(obl_axiy, a, b, OBL_NOOP, suffix, T, LOAD, STORE, XOR);    \
+        OBL_SHUF_TEMPLATE(obl_axiy, a, b, OBL_NOOP, T, LOAD, STORE);                 \
     }                                                                                \
     attr static void obl_scal_##suffix(u8 *a, u8 u, unsigned k)                      \
     {                                                                                \
         obl_axiy_##suffix(a, a, u, k);                                               \
-    }                                                                                \
-    attr OBL_INLINE void obl_axpy2_##suffix(u8 *d0, u8 *d1, const u8 *src,           \
-                                            u8 u0, u8 u1, unsigned k)                \
-    {                                                                                \
-        unsigned i = 0, bulk = k - (k % sizeof(T));                                  \
-        if (u0 == 1 && u1 == 1) {                                                    \
-            for (; i < bulk; i += sizeof(T)) {                                       \
-                T s = LOAD((const T *)(src + i));                                    \
-                STORE((T *)(d0 + i), XOR(LOAD((const T *)(d0 + i)), s));             \
-                STORE((T *)(d1 + i), XOR(LOAD((const T *)(d1 + i)), s));             \
-            }                                                                        \
-            for (; i < k; i++) {                                                     \
-                u8 s = src[i];                                                       \
-                d0[i] ^= s;                                                          \
-                d1[i] ^= s;                                                          \
-            }                                                                        \
-        } else {                                                                     \
-            VEC_MASK_##suffix();                                                     \
-            VEC_COEF_##suffix(0, u0);                                                \
-            VEC_COEF_##suffix(1, u1);                                                \
-            for (; i < bulk; i += sizeof(T)) {                                       \
-                T s = LOAD((const T *)(src + i));                                    \
-                VEC_SPLIT_##suffix(s, 0);                                            \
-                T p0 = VEC_MUL_##suffix(0, s, 0);                                    \
-                T p1 = VEC_MUL_##suffix(1, s, 0);                                    \
-                STORE((T *)(d0 + i), XOR(LOAD((const T *)(d0 + i)), p0));            \
-                STORE((T *)(d1 + i), XOR(LOAD((const T *)(d1 + i)), p1));            \
-            }                                                                        \
-            obl_axpy2_ref(d0 + i, d1 + i, src + i, u0, u1, k - i);                   \
-        }                                                                            \
-    }                                                                                \
-    attr OBL_INLINE void obl_axpy4_##suffix(u8 *d0, u8 *d1, u8 *d2, u8 *d3,          \
-                                            const u8 *src, u8 u0, u8 u1,             \
-                                            u8 u2, u8 u3, unsigned k)                \
-    {                                                                                \
-        unsigned i = 0, bulk = k - (k % sizeof(T));                                  \
-        if (u0 == 1 && u1 == 1 && u2 == 1 && u3 == 1) {                              \
-            for (; i < bulk; i += sizeof(T)) {                                       \
-                T s = LOAD((const T *)(src + i));                                    \
-                STORE((T *)(d0 + i), XOR(LOAD((const T *)(d0 + i)), s));             \
-                STORE((T *)(d1 + i), XOR(LOAD((const T *)(d1 + i)), s));             \
-                STORE((T *)(d2 + i), XOR(LOAD((const T *)(d2 + i)), s));             \
-                STORE((T *)(d3 + i), XOR(LOAD((const T *)(d3 + i)), s));             \
-            }                                                                        \
-            for (; i < k; i++) {                                                     \
-                u8 s = src[i];                                                       \
-                d0[i] ^= s;                                                          \
-                d1[i] ^= s;                                                          \
-                d2[i] ^= s;                                                          \
-                d3[i] ^= s;                                                          \
-            }                                                                        \
-        } else {                                                                     \
-            VEC_MASK_##suffix();                                                     \
-            VEC_COEF_##suffix(0, u0);                                                \
-            VEC_COEF_##suffix(1, u1);                                                \
-            VEC_COEF_##suffix(2, u2);                                                \
-            VEC_COEF_##suffix(3, u3);                                                \
-            for (; i < bulk; i += sizeof(T)) {                                       \
-                T s = LOAD((const T *)(src + i));                                    \
-                VEC_SPLIT_##suffix(s, 0);                                            \
-                T p0 = VEC_MUL_##suffix(0, s, 0);                                    \
-                T p1 = VEC_MUL_##suffix(1, s, 0);                                    \
-                T p2 = VEC_MUL_##suffix(2, s, 0);                                    \
-                T p3 = VEC_MUL_##suffix(3, s, 0);                                    \
-                STORE((T *)(d0 + i), XOR(LOAD((const T *)(d0 + i)), p0));            \
-                STORE((T *)(d1 + i), XOR(LOAD((const T *)(d1 + i)), p1));            \
-                STORE((T *)(d2 + i), XOR(LOAD((const T *)(d2 + i)), p2));            \
-                STORE((T *)(d3 + i), XOR(LOAD((const T *)(d3 + i)), p3));            \
-            }                                                                        \
-            obl_axpy4_ref(d0 + i, d1 + i, d2 + i, d3 + i, src + i,                   \
-                          u0, u1, u2, u3, k - i);                                    \
-        }                                                                            \
-    }                                                                                \
-    OBL_ROW_OPS(suffix, attr, obl_axpy_##suffix, obl_scal_##suffix,                  \
-                obl_axpy2_##suffix, obl_axpy4_##suffix)
+    }
 
 #if defined(OBLAS_ARCH_X86)
 
@@ -404,58 +293,94 @@ OBL_ROW_OPS(ref, , obl_axpy_ref, obl_scal_ref_wrapper, obl_axpy2_ref, obl_axpy4_
 #define OBL_TGT_SSSE3_GFNI  __attribute__((target("ssse3,gfni")))
 
 GENERATE_VEC_OPS(avx512, OBL_TGT_AVX512, __m512i, _mm512_loadu_si512, _mm512_storeu_si512, _mm512_xor_si512)
+#define VEC_TYPE __m512i
+#define VEC_LOAD obl_load_avx512
+#define VEC_XOR_INTO obl_xor_into_avx512
 
 /* avx512 gfni */
-#define VEC_MASK_avx512_gfni()            (void)0
-#define VEC_COEF_avx512_gfni(id, c)       const __m512i m_##id = _mm512_set1_epi64(GF2_8_AFFINE_MAT[c])
-#define VEC_SPLIT_avx512_gfni(bx, id)     (void)0
-#define VEC_MUL_avx512_gfni(cid, bx, sid) _mm512_gf2p8affine_epi64_epi8(bx, m_##cid, 0)
+#define VEC_MASK()            (void)0
+#define VEC_COEF(id, c)       const __m512i m_##id = _mm512_set1_epi64(GF2_8_AFFINE_MAT[c])
+#define VEC_SPLIT(bx, id)     (void)0
+#define VEC_MUL(cid, bx, sid) _mm512_gf2p8affine_epi64_epi8(bx, m_##cid, 0)
 GENERATE_IMPL(avx512_gfni, OBL_TGT_AVX512_GFNI, __m512i, _mm512_loadu_si512, _mm512_storeu_si512, _mm512_xor_si512)
+#define OBL_KERNEL(name) obl_##name##_avx512_gfni
+#define OBL_TARGET OBL_TGT_AVX512_GFNI
+#include "oblas_rows.inc"
 
 /* avx512 shuffle */
-#define VEC_MASK_avx512_std()         const __m512i mask = _mm512_set1_epi8(0x0f)
-#define VEC_COEF_avx512_std(id, c)    const __m512i lo_##id = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_LO + (unsigned)(c) * 16))); \
-                                      const __m512i hi_##id = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_HI + (unsigned)(c) * 16)))
-#define VEC_SPLIT_avx512_std(bx, id)  __m512i slo_##id = _mm512_and_si512(bx, mask); \
-                                      __m512i shi_##id = _mm512_and_si512(_mm512_srli_epi64(bx, 4), mask)
-#define VEC_MUL_avx512_std(c, bx, s)  _mm512_xor_si512(_mm512_shuffle_epi8(lo_##c, slo_##s), _mm512_shuffle_epi8(hi_##c, shi_##s))
+#define VEC_MASK()         const __m512i mask = _mm512_set1_epi8(0x0f)
+#define VEC_COEF(id, c)    const __m512i lo_##id = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_LO + (unsigned)(c) * 16))); \
+                           const __m512i hi_##id = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_HI + (unsigned)(c) * 16)))
+#define VEC_SPLIT(bx, id)  __m512i slo_##id = _mm512_and_si512(bx, mask); \
+                           __m512i shi_##id = _mm512_and_si512(_mm512_srli_epi64(bx, 4), mask)
+#define VEC_MUL(c, bx, s)  _mm512_xor_si512(_mm512_shuffle_epi8(lo_##c, slo_##s), _mm512_shuffle_epi8(hi_##c, shi_##s))
 GENERATE_IMPL(avx512_std, OBL_TGT_AVX512, __m512i, _mm512_loadu_si512, _mm512_storeu_si512, _mm512_xor_si512)
+#define OBL_KERNEL(name) obl_##name##_avx512_std
+#define OBL_TARGET OBL_TGT_AVX512
+#include "oblas_rows.inc"
+#undef VEC_TYPE
+#undef VEC_LOAD
+#undef VEC_XOR_INTO
 
 GENERATE_VEC_OPS(avx2, OBL_TGT_AVX2, __m256i, _mm256_loadu_si256, _mm256_storeu_si256, _mm256_xor_si256)
+#define VEC_TYPE __m256i
+#define VEC_LOAD obl_load_avx2
+#define VEC_XOR_INTO obl_xor_into_avx2
 
 /* avx2 gfni */
-#define VEC_MASK_avx2_gfni()            (void)0
-#define VEC_COEF_avx2_gfni(id, c)       const __m256i m_##id = _mm256_set1_epi64x(GF2_8_AFFINE_MAT[c])
-#define VEC_SPLIT_avx2_gfni(bx, id)     (void)0
-#define VEC_MUL_avx2_gfni(cid, bx, sid) _mm256_gf2p8affine_epi64_epi8(bx, m_##cid, 0)
+#define VEC_MASK()            (void)0
+#define VEC_COEF(id, c)       const __m256i m_##id = _mm256_set1_epi64x(GF2_8_AFFINE_MAT[c])
+#define VEC_SPLIT(bx, id)     (void)0
+#define VEC_MUL(cid, bx, sid) _mm256_gf2p8affine_epi64_epi8(bx, m_##cid, 0)
 GENERATE_IMPL(avx2_gfni, OBL_TGT_AVX2_GFNI, __m256i, _mm256_loadu_si256, _mm256_storeu_si256, _mm256_xor_si256)
+#define OBL_KERNEL(name) obl_##name##_avx2_gfni
+#define OBL_TARGET OBL_TGT_AVX2_GFNI
+#include "oblas_rows.inc"
 
 /* avx2 shuffle */
-#define VEC_MASK_avx2_std()         const __m256i mask = _mm256_set1_epi8(0x0f)
-#define VEC_COEF_avx2_std(id, c)    const __m256i lo_##id = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_LO + (unsigned)(c) * 16))); \
-                                    const __m256i hi_##id = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_HI + (unsigned)(c) * 16)))
-#define VEC_SPLIT_avx2_std(bx, id)  __m256i slo_##id = _mm256_and_si256(bx, mask); \
-                                    __m256i shi_##id = _mm256_and_si256(_mm256_srli_epi64(bx, 4), mask)
-#define VEC_MUL_avx2_std(c, bx, s)  _mm256_xor_si256(_mm256_shuffle_epi8(lo_##c, slo_##s), _mm256_shuffle_epi8(hi_##c, shi_##s))
+#define VEC_MASK()         const __m256i mask = _mm256_set1_epi8(0x0f)
+#define VEC_COEF(id, c)    const __m256i lo_##id = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_LO + (unsigned)(c) * 16))); \
+                           const __m256i hi_##id = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(GF2_8_SHUF_HI + (unsigned)(c) * 16)))
+#define VEC_SPLIT(bx, id)  __m256i slo_##id = _mm256_and_si256(bx, mask); \
+                           __m256i shi_##id = _mm256_and_si256(_mm256_srli_epi64(bx, 4), mask)
+#define VEC_MUL(c, bx, s)  _mm256_xor_si256(_mm256_shuffle_epi8(lo_##c, slo_##s), _mm256_shuffle_epi8(hi_##c, shi_##s))
 GENERATE_IMPL(avx2_std, OBL_TGT_AVX2, __m256i, _mm256_loadu_si256, _mm256_storeu_si256, _mm256_xor_si256)
+#define OBL_KERNEL(name) obl_##name##_avx2_std
+#define OBL_TARGET OBL_TGT_AVX2
+#include "oblas_rows.inc"
+#undef VEC_TYPE
+#undef VEC_LOAD
+#undef VEC_XOR_INTO
 
 GENERATE_VEC_OPS(ssse3, OBL_TGT_SSSE3, __m128i, _mm_loadu_si128, _mm_storeu_si128, _mm_xor_si128)
+#define VEC_TYPE __m128i
+#define VEC_LOAD obl_load_ssse3
+#define VEC_XOR_INTO obl_xor_into_ssse3
 
 /* ssse3 gfni */
-#define VEC_MASK_ssse3_gfni()            (void)0
-#define VEC_COEF_ssse3_gfni(id, c)       const __m128i m_##id = _mm_set1_epi64x(GF2_8_AFFINE_MAT[c])
-#define VEC_SPLIT_ssse3_gfni(bx, id)     (void)0
-#define VEC_MUL_ssse3_gfni(cid, bx, sid) _mm_gf2p8affine_epi64_epi8(bx, m_##cid, 0)
+#define VEC_MASK()            (void)0
+#define VEC_COEF(id, c)       const __m128i m_##id = _mm_set1_epi64x(GF2_8_AFFINE_MAT[c])
+#define VEC_SPLIT(bx, id)     (void)0
+#define VEC_MUL(cid, bx, sid) _mm_gf2p8affine_epi64_epi8(bx, m_##cid, 0)
 GENERATE_IMPL(ssse3_gfni, OBL_TGT_SSSE3_GFNI, __m128i, _mm_loadu_si128, _mm_storeu_si128, _mm_xor_si128)
+#define OBL_KERNEL(name) obl_##name##_ssse3_gfni
+#define OBL_TARGET OBL_TGT_SSSE3_GFNI
+#include "oblas_rows.inc"
 
 /* ssse3 shuffle */
-#define VEC_MASK_ssse3_std()         const __m128i mask = _mm_set1_epi8(0x0f)
-#define VEC_COEF_ssse3_std(id, c)    const __m128i lo_##id = _mm_loadu_si128((const __m128i *)(GF2_8_SHUF_LO + (unsigned)(c) * 16)); \
-                                     const __m128i hi_##id = _mm_loadu_si128((const __m128i *)(GF2_8_SHUF_HI + (unsigned)(c) * 16))
-#define VEC_SPLIT_ssse3_std(bx, id)  __m128i slo_##id = _mm_and_si128(bx, mask); \
-                                     __m128i shi_##id = _mm_and_si128(_mm_srli_epi64(bx, 4), mask)
-#define VEC_MUL_ssse3_std(c, bx, s)  _mm_xor_si128(_mm_shuffle_epi8(lo_##c, slo_##s), _mm_shuffle_epi8(hi_##c, shi_##s))
+#define VEC_MASK()         const __m128i mask = _mm_set1_epi8(0x0f)
+#define VEC_COEF(id, c)    const __m128i lo_##id = _mm_loadu_si128((const __m128i *)(GF2_8_SHUF_LO + (unsigned)(c) * 16)); \
+                           const __m128i hi_##id = _mm_loadu_si128((const __m128i *)(GF2_8_SHUF_HI + (unsigned)(c) * 16))
+#define VEC_SPLIT(bx, id)  __m128i slo_##id = _mm_and_si128(bx, mask); \
+                           __m128i shi_##id = _mm_and_si128(_mm_srli_epi64(bx, 4), mask)
+#define VEC_MUL(c, bx, s)  _mm_xor_si128(_mm_shuffle_epi8(lo_##c, slo_##s), _mm_shuffle_epi8(hi_##c, shi_##s))
 GENERATE_IMPL(ssse3_std, OBL_TGT_SSSE3, __m128i, _mm_loadu_si128, _mm_storeu_si128, _mm_xor_si128)
+#define OBL_KERNEL(name) obl_##name##_ssse3_std
+#define OBL_TARGET OBL_TGT_SSSE3
+#include "oblas_rows.inc"
+#undef VEC_TYPE
+#undef VEC_LOAD
+#undef VEC_XOR_INTO
 
 OBL_TGT_AVX512 static void obl_axpyb32_avx512(u8 *a, u32 *b, u8 u, unsigned k)
 {
@@ -542,14 +467,23 @@ static inline uint8x16_t vqtbl1q_u8(uint8x16_t tbl, uint8x16_t idx)
 
 #define VEC_LOAD_neon(ptr)       vld1q_u8((const uint8_t *)(ptr))
 #define VEC_STORE_neon(ptr, val) vst1q_u8((uint8_t *)(ptr), val)
-#define VEC_MASK_neon()          const uint8x16_t mask = vdupq_n_u8(0x0f)
-#define VEC_COEF_neon(id, c)     const uint8x16_t lo_##id = vld1q_u8(GF2_8_SHUF_LO + (unsigned)(c) * 16); \
-                                 const uint8x16_t hi_##id = vld1q_u8(GF2_8_SHUF_HI + (unsigned)(c) * 16)
-#define VEC_SPLIT_neon(bx, id)   uint8x16_t slo_##id = vandq_u8(bx, mask); \
-                                 uint8x16_t shi_##id = vshrq_n_u8(bx, 4)
-#define VEC_MUL_neon(c, bx, s)   veorq_u8(vqtbl1q_u8(lo_##c, slo_##s), vqtbl1q_u8(hi_##c, shi_##s))
+#define VEC_MASK()          const uint8x16_t mask = vdupq_n_u8(0x0f)
+#define VEC_COEF(id, c)     const uint8x16_t lo_##id = vld1q_u8(GF2_8_SHUF_LO + (unsigned)(c) * 16); \
+                            const uint8x16_t hi_##id = vld1q_u8(GF2_8_SHUF_HI + (unsigned)(c) * 16)
+#define VEC_SPLIT(bx, id)   uint8x16_t slo_##id = vandq_u8(bx, mask); \
+                            uint8x16_t shi_##id = vshrq_n_u8(bx, 4)
+#define VEC_MUL(c, bx, s)   veorq_u8(vqtbl1q_u8(lo_##c, slo_##s), vqtbl1q_u8(hi_##c, shi_##s))
 GENERATE_VEC_OPS(neon, , uint8x16_t, VEC_LOAD_neon, VEC_STORE_neon, veorq_u8)
+#define VEC_TYPE uint8x16_t
+#define VEC_LOAD obl_load_neon
+#define VEC_XOR_INTO obl_xor_into_neon
 GENERATE_IMPL(neon, , uint8x16_t, VEC_LOAD_neon, VEC_STORE_neon, veorq_u8)
+#define OBL_KERNEL(name) obl_##name##_neon
+#define OBL_TARGET
+#include "oblas_rows.inc"
+#undef VEC_TYPE
+#undef VEC_LOAD
+#undef VEC_XOR_INTO
 
 static void obl_axpyb32_neon(u8 *a, u32 *b, u8 u, unsigned k)
 {
@@ -597,6 +531,49 @@ static void obl_swap_rvv(u8 *a, u8 *b, unsigned k)
     }
 }
 
+/* Gather the low- and high-nibble products from the coefficient tables. */
+OBL_INLINE vuint8m1_t rvv_product(vuint8m1_t lo, vuint8m1_t hi,
+                                  vuint8m1_t slo, vuint8m1_t shi, size_t vl)
+{
+    vuint8m1_t low = __riscv_vrgather_vv_u8m1(lo, slo, vl);
+    vuint8m1_t high = __riscv_vrgather_vv_u8m1(hi, shi, vl);
+    return __riscv_vxor_vv_u8m1(low, high, vl);
+}
+
+OBL_INLINE void rvv_multiply_row(u8 *a, u8 *b, u8 u, unsigned k, int add)
+{
+    size_t tvl = __riscv_vsetvl_e8m1(16);
+    if (tvl < 16) {
+        if (add)
+            obl_axpy_ref(a, b, u, k);
+        else
+            obl_axiy_ref(a, b, u, k);
+        return;
+    }
+    vuint8m1_t lo = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + (unsigned)u * 16, tvl);
+    vuint8m1_t hi = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + (unsigned)u * 16, tvl);
+    size_t vl;
+    for (unsigned i = 0; i < k; i += (unsigned)vl) {
+        vl = __riscv_vsetvl_e8m1(k - i);
+        vuint8m1_t acc;
+        if (add)
+            acc = __riscv_vle8_v_u8m1(a + i, vl);
+        vuint8m1_t src = __riscv_vle8_v_u8m1(b + i, vl);
+        vuint8m1_t slo = __riscv_vand_vx_u8m1(src, 0x0f, vl);
+        vuint8m1_t shi = __riscv_vsrl_vx_u8m1(src, 4, vl);
+        vuint8m1_t value = rvv_product(lo, hi, slo, shi, vl);
+        if (add)
+            value = __riscv_vxor_vv_u8m1(acc, value, vl);
+        __riscv_vse8_v_u8m1(a + i, value, vl);
+    }
+}
+
+OBL_INLINE void rvv_xor_into_m4(u8 *dst, vuint8m4_t value, size_t vl)
+{
+    vuint8m4_t old = __riscv_vle8_v_u8m4(dst, vl);
+    __riscv_vse8_v_u8m4(dst, __riscv_vxor_vv_u8m4(old, value, vl), vl);
+}
+
 static inline void obl_axpy_rvv(u8 *a, u8 *b, u8 u, unsigned k)
 {
     if (u == 0)
@@ -611,49 +588,18 @@ static inline void obl_axpy_rvv(u8 *a, u8 *b, u8 u, unsigned k)
         }
         return;
     }
-    size_t tvl = __riscv_vsetvl_e8m1(16);
-    if (tvl < 16) {
-        obl_axpy_ref(a, b, u, k);
-        return;
-    }
-    vuint8m1_t urow_lo = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + (unsigned)u * 16, tvl);
-    vuint8m1_t urow_hi = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + (unsigned)u * 16, tvl);
-    size_t vl;
-    for (unsigned i = 0; i < k; i += (unsigned)vl) {
-        vl = __riscv_vsetvl_e8m1(k - i);
-        vuint8m1_t va = __riscv_vle8_v_u8m1(a + i, vl);
-        vuint8m1_t vb = __riscv_vle8_v_u8m1(b + i, vl);
-        vuint8m1_t prod_lo = __riscv_vrgather_vv_u8m1(urow_lo, __riscv_vand_vx_u8m1(vb, 0x0f, vl), vl);
-        vuint8m1_t prod_hi = __riscv_vrgather_vv_u8m1(urow_hi, __riscv_vsrl_vx_u8m1(vb, 4, vl), vl);
-        __riscv_vse8_v_u8m1(a + i, __riscv_vxor_vv_u8m1(va, __riscv_vxor_vv_u8m1(prod_lo, prod_hi, vl), vl), vl);
-    }
+    rvv_multiply_row(a, b, u, k, 1);
 }
 
 static void obl_axiy_rvv(u8 *a, u8 *b, u8 u, unsigned k)
 {
     if (u == 0) {
         memset(a, 0, k);
-        return;
-    }
-    if (u == 1) {
+    } else if (u == 1) {
         if (a != b)
             memcpy(a, b, k);
-        return;
-    }
-    size_t tvl = __riscv_vsetvl_e8m1(16);
-    if (tvl < 16) {
-        obl_axiy_ref(a, b, u, k);
-        return;
-    }
-    vuint8m1_t urow_lo = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + (unsigned)u * 16, tvl);
-    vuint8m1_t urow_hi = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + (unsigned)u * 16, tvl);
-    size_t vl;
-    for (unsigned i = 0; i < k; i += (unsigned)vl) {
-        vl = __riscv_vsetvl_e8m1(k - i);
-        vuint8m1_t vb = __riscv_vle8_v_u8m1(b + i, vl);
-        vuint8m1_t prod_lo = __riscv_vrgather_vv_u8m1(urow_lo, __riscv_vand_vx_u8m1(vb, 0x0f, vl), vl);
-        vuint8m1_t prod_hi = __riscv_vrgather_vv_u8m1(urow_hi, __riscv_vsrl_vx_u8m1(vb, 4, vl), vl);
-        __riscv_vse8_v_u8m1(a + i, __riscv_vxor_vv_u8m1(prod_lo, prod_hi, vl), vl);
+    } else {
+        rvv_multiply_row(a, b, u, k, 0);
     }
 }
 
@@ -662,27 +608,34 @@ static void obl_scal_rvv(u8 *a, u8 u, unsigned k)
     obl_axiy_rvv(a, a, u, k);
 }
 
-static void obl_xor_set4_rvv(u8 *dst, const u8 *r0, const u8 *r1, const u8 *r2, const u8 *r3, unsigned k)
+OBL_INLINE void rvv_xor4(u8 *dst, const u8 *r0, const u8 *r1, const u8 *r2,
+                         const u8 *r3, unsigned k, int add)
 {
     for (unsigned i = 0; i < k;) {
         size_t vl = __riscv_vsetvl_e8m4(k - i);
         vuint8m4_t v01 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r0 + i, vl), __riscv_vle8_v_u8m4(r1 + i, vl), vl);
         vuint8m4_t v23 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r2 + i, vl), __riscv_vle8_v_u8m4(r3 + i, vl), vl);
+        if (add)
+            v01 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(dst + i, vl), v01, vl);
         __riscv_vse8_v_u8m4(dst + i, __riscv_vxor_vv_u8m4(v01, v23, vl), vl);
         i += (unsigned)vl;
     }
 }
 
+static void obl_xor_set4_rvv(u8 *dst, const u8 *r0, const u8 *r1, const u8 *r2, const u8 *r3, unsigned k)
+{
+    rvv_xor4(dst, r0, r1, r2, r3, k, 0);
+}
+
 static void obl_xor_acc4_rvv(u8 *dst, const u8 *r0, const u8 *r1, const u8 *r2, const u8 *r3, unsigned k)
 {
-    for (unsigned i = 0; i < k;) {
-        size_t vl = __riscv_vsetvl_e8m4(k - i);
-        vuint8m4_t v01 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r0 + i, vl), __riscv_vle8_v_u8m4(r1 + i, vl), vl);
-        vuint8m4_t v23 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r2 + i, vl), __riscv_vle8_v_u8m4(r3 + i, vl), vl);
-        vuint8m4_t acc = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(dst + i, vl), v01, vl);
-        __riscv_vse8_v_u8m4(dst + i, __riscv_vxor_vv_u8m4(acc, v23, vl), vl);
-        i += (unsigned)vl;
-    }
+    rvv_xor4(dst, r0, r1, r2, r3, k, 1);
+}
+
+OBL_INLINE void rvv_xor_into_m1(u8 *dst, vuint8m1_t value, size_t vl)
+{
+    vuint8m1_t old = __riscv_vle8_v_u8m1(dst, vl);
+    __riscv_vse8_v_u8m1(dst, __riscv_vxor_vv_u8m1(old, value, vl), vl);
 }
 
 /* keep LMUL=1 for vrgather to avoid quadratic LMUL microcode penalties */
@@ -692,8 +645,8 @@ OBL_INLINE void obl_axpy2_rvv(u8 *d0, u8 *d1, const u8 *src, u8 u0, u8 u1, unsig
         for (unsigned i = 0; i < k;) {
             size_t vl = __riscv_vsetvl_e8m4(k - i);
             vuint8m4_t s = __riscv_vle8_v_u8m4(src + i, vl);
-            __riscv_vse8_v_u8m4(d0 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d0 + i, vl), s, vl), vl);
-            __riscv_vse8_v_u8m4(d1 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d1 + i, vl), s, vl), vl);
+            rvv_xor_into_m4(d0 + i, s, vl);
+            rvv_xor_into_m4(d1 + i, s, vl);
             i += (unsigned)vl;
         }
         return;
@@ -712,10 +665,10 @@ OBL_INLINE void obl_axpy2_rvv(u8 *d0, u8 *d1, const u8 *src, u8 u0, u8 u1, unsig
         vuint8m1_t s = __riscv_vle8_v_u8m1(src + i, vl);
         vuint8m1_t slo = __riscv_vand_vx_u8m1(s, 0x0f, vl);
         vuint8m1_t shi = __riscv_vsrl_vx_u8m1(s, 4, vl);
-        vuint8m1_t p0 = __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo0, slo, vl), __riscv_vrgather_vv_u8m1(hi0, shi, vl), vl);
-        vuint8m1_t p1 = __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo1, slo, vl), __riscv_vrgather_vv_u8m1(hi1, shi, vl), vl);
-        __riscv_vse8_v_u8m1(d0 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d0 + i, vl), p0, vl), vl);
-        __riscv_vse8_v_u8m1(d1 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d1 + i, vl), p1, vl), vl);
+        vuint8m1_t p0 = rvv_product(lo0, hi0, slo, shi, vl);
+        vuint8m1_t p1 = rvv_product(lo1, hi1, slo, shi, vl);
+        rvv_xor_into_m1(d0 + i, p0, vl);
+        rvv_xor_into_m1(d1 + i, p1, vl);
         i += (unsigned)vl;
     }
 }
@@ -727,10 +680,10 @@ OBL_INLINE void obl_axpy4_rvv(u8 *d0, u8 *d1, u8 *d2, u8 *d3, const u8 *src,
         for (unsigned i = 0; i < k;) {
             size_t vl = __riscv_vsetvl_e8m4(k - i);
             vuint8m4_t s = __riscv_vle8_v_u8m4(src + i, vl);
-            __riscv_vse8_v_u8m4(d0 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d0 + i, vl), s, vl), vl);
-            __riscv_vse8_v_u8m4(d1 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d1 + i, vl), s, vl), vl);
-            __riscv_vse8_v_u8m4(d2 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d2 + i, vl), s, vl), vl);
-            __riscv_vse8_v_u8m4(d3 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d3 + i, vl), s, vl), vl);
+            rvv_xor_into_m4(d0 + i, s, vl);
+            rvv_xor_into_m4(d1 + i, s, vl);
+            rvv_xor_into_m4(d2 + i, s, vl);
+            rvv_xor_into_m4(d3 + i, s, vl);
             i += (unsigned)vl;
         }
         return;
@@ -753,14 +706,14 @@ OBL_INLINE void obl_axpy4_rvv(u8 *d0, u8 *d1, u8 *d2, u8 *d3, const u8 *src,
         vuint8m1_t s = __riscv_vle8_v_u8m1(src + i, vl);
         vuint8m1_t slo = __riscv_vand_vx_u8m1(s, 0x0f, vl);
         vuint8m1_t shi = __riscv_vsrl_vx_u8m1(s, 4, vl);
-        vuint8m1_t p0 = __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo0, slo, vl), __riscv_vrgather_vv_u8m1(hi0, shi, vl), vl);
-        vuint8m1_t p1 = __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo1, slo, vl), __riscv_vrgather_vv_u8m1(hi1, shi, vl), vl);
-        vuint8m1_t p2 = __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo2, slo, vl), __riscv_vrgather_vv_u8m1(hi2, shi, vl), vl);
-        vuint8m1_t p3 = __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo3, slo, vl), __riscv_vrgather_vv_u8m1(hi3, shi, vl), vl);
-        __riscv_vse8_v_u8m1(d0 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d0 + i, vl), p0, vl), vl);
-        __riscv_vse8_v_u8m1(d1 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d1 + i, vl), p1, vl), vl);
-        __riscv_vse8_v_u8m1(d2 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d2 + i, vl), p2, vl), vl);
-        __riscv_vse8_v_u8m1(d3 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d3 + i, vl), p3, vl), vl);
+        vuint8m1_t p0 = rvv_product(lo0, hi0, slo, shi, vl);
+        vuint8m1_t p1 = rvv_product(lo1, hi1, slo, shi, vl);
+        vuint8m1_t p2 = rvv_product(lo2, hi2, slo, shi, vl);
+        vuint8m1_t p3 = rvv_product(lo3, hi3, slo, shi, vl);
+        rvv_xor_into_m1(d0 + i, p0, vl);
+        rvv_xor_into_m1(d1 + i, p1, vl);
+        rvv_xor_into_m1(d2 + i, p2, vl);
+        rvv_xor_into_m1(d3 + i, p3, vl);
         i += (unsigned)vl;
     }
 }
@@ -786,13 +739,15 @@ static void obl_axpyb32_rvv(u8 *a, u32 *b, u8 u, unsigned k)
     }
 }
 
-OBL_ROW_OPS(rvv, , obl_axpy_rvv, obl_scal_rvv, obl_axpy2_rvv, obl_axpy4_rvv)
+#define OBL_KERNEL(name) obl_##name##_rvv
+#define OBL_TARGET
+#include "oblas_rows.inc"
 #endif
 
-#define OBL_SET_IMPL(suffix, simd, b32, alignment)                           \
+#define OBL_SET_IMPL(suffix, simd, alignment)                                \
     *impl = (struct oblas_impl){                                             \
         .axpy = obl_axpy_##suffix, .scal = obl_scal_##suffix,                \
-        .axiy = obl_axiy_##suffix, .axpyb32 = obl_axpyb32_##b32,             \
+        .axiy = obl_axiy_##suffix, .axpyb32 = obl_axpyb32_##simd,            \
         .align_size = (alignment), .swap = obl_swap_##simd,                  \
         .row_ops = obl_row_ops_##suffix,                                     \
         .xor_set4 = obl_xor_set4_##simd, .xor_acc4 = obl_xor_acc4_##simd }
@@ -809,7 +764,7 @@ void oblas_get_impl(struct oblas_impl *impl)
 #endif
     /* fallback */
     impl->axpy = obl_axpy_ref;
-    impl->scal = obl_scal_ref_wrapper;
+    impl->scal = obl_scal_ref;
     impl->axiy = obl_axiy_ref;
     impl->axpyb32 = obl_axpyb32_ref;
     impl->align_size = sizeof(void *);
@@ -825,22 +780,22 @@ void oblas_get_impl(struct oblas_impl *impl)
                      __builtin_cpu_supports("avx512dq") &&
                      __builtin_cpu_supports("avx512vl");
     if (has_avx512 && __builtin_cpu_supports("gfni")) {
-        OBL_SET_IMPL(avx512_gfni, avx512, avx512, 64);
+        OBL_SET_IMPL(avx512_gfni, avx512, 64);
     } else if (has_avx512) {
-        OBL_SET_IMPL(avx512_std, avx512, avx512, 64);
+        OBL_SET_IMPL(avx512_std, avx512, 64);
     } else if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("gfni")) {
-        OBL_SET_IMPL(avx2_gfni, avx2, avx2, 32);
+        OBL_SET_IMPL(avx2_gfni, avx2, 32);
     } else if (__builtin_cpu_supports("avx2")) {
-        OBL_SET_IMPL(avx2_std, avx2, avx2, 32);
+        OBL_SET_IMPL(avx2_std, avx2, 32);
     } else if (__builtin_cpu_supports("ssse3") && __builtin_cpu_supports("gfni")) {
-        OBL_SET_IMPL(ssse3_gfni, ssse3, ssse3, 16);
+        OBL_SET_IMPL(ssse3_gfni, ssse3, 16);
     } else if (__builtin_cpu_supports("ssse3")) {
-        OBL_SET_IMPL(ssse3_std, ssse3, ssse3, 16);
+        OBL_SET_IMPL(ssse3_std, ssse3, 16);
     }
 #elif defined(OBLAS_ARCH_ARM) && (defined(__ARM_NEON) || defined(_MSC_VER))
-    OBL_SET_IMPL(neon, neon, neon, 16);
+    OBL_SET_IMPL(neon, neon, 16);
 #elif defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
-    OBL_SET_IMPL(rvv, rvv, rvv, 16);
+    OBL_SET_IMPL(rvv, rvv, 16);
 #endif
 #ifdef _MSC_VER
 #pragma warning(pop)

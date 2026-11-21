@@ -64,6 +64,7 @@ benchmark_latency: benchmark_latency.o $(OBJ)
 t/00util/interop: t/00util/interop.o libnanorq.a
 
 $(CORE_OBJ) lib/nanorq.o t/00util/test_oblas_kernels.o: deps/obl/oblas_lite.h
+deps/obl/oblas_lite.o t/00util/test_oblas_kernels.o: deps/obl/oblas_rows.inc
 
 t/00util/matgen: t/00util/matgen.o $(CORE_OBJ)
 t/00util/repgen: t/00util/repgen.o $(CORE_OBJ)

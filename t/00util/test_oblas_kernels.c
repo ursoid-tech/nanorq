@@ -451,7 +451,7 @@ int main(void) {
   check_all("automatic", suite);
   suite.impl.axpy = obl_axpy_ref;
   suite.impl.axiy = obl_axiy_ref;
-  suite.impl.scal = obl_scal_ref_wrapper;
+  suite.impl.scal = obl_scal_ref;
   suite.impl.swap = obl_swap;
   suite.impl.axpyb32 = obl_axpyb32_ref;
   suite.impl.xor_set4 = obl_xor_set4_ref;
