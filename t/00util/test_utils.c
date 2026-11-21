@@ -316,6 +316,139 @@ static void test_large_matrix_offsets(void) {
 #endif
 }
 
+static void test_h0_gf2_mode(void) {
+  const uint32_t ks[] = {1, 9, 10, 100, 256, 1000};
+  const uint32_t T = 64;
+  for (size_t t = 0; t < sizeof(ks) / sizeof(*ks); t++) {
+    uint32_t K = ks[t];
+    uint32_t drops = K < 10 ? 1 : K / 10;
+    uint32_t oh = K / 20 > 16 ? K / 20 : 16;
+
+    nanorq_core enc = {0};
+    assert(nanorq_core_encoder_new_gf2(K, 0, &enc));
+    assert(enc.P.H == 0);
+    size_t ep_len = nanorq_core_calculate_prepare_memory(&enc);
+    size_t es_len = ops_estimate_schedule_bytes(K);
+    uint8_t *ep = malloc(ep_len);
+    void *es_mem = malloc(es_len);
+    schedule es = {0};
+    assert(ep && es_mem && schedule_init(&es, es_mem, es_len));
+    assert(nanorq_core_prepare(&enc, ep, ep_len));
+    nanorq_core_set_op_callback(&enc, &es, ops_push);
+    size_t ew_len = nanorq_core_calculate_prepared_work_memory(&enc);
+    uint8_t *ew = malloc(ew_len + 1);
+    assert(ew && nanorq_core_precalculate(&enc, ew + 1, ew_len) &&
+           !es.overflowed && es.cpidx == 2);
+    for (uint32_t idx = 0; idx < es.ops.n; idx++)
+      assert(es.ops.a[idx].u == 1);
+
+    uint32_t stride = nanorq_core_recommended_stride(T);
+    uint32_t enc_rows = nanorq_core_get_pc_rows(&enc);
+    uint8_t *d_enc = calloc(enc_rows, stride);
+    uint8_t *src = malloc((size_t)K * T);
+    assert(d_enc && src);
+    uint32_t state = 1;
+    for (uint32_t i = 0; i < K; i++) {
+      uint8_t *symbol = src + (size_t)i * T;
+      symbol[0] = (uint8_t)(73U * i + 19U);
+      symbol[1] = (uint8_t)(i >> 8);
+      for (uint32_t j = 2; j < T; j++) {
+        state = 1664525U * state + 1013904223U;
+        symbol[j] = (uint8_t)(state >> 24);
+      }
+      nanorq_core_place_symbol(&enc, d_enc, stride, i, symbol, T);
+    }
+    ops_run(&enc, d_enc, stride, &es);
+
+    uint32_t num_rep = drops + oh;
+    uint8_t *rep = calloc(num_rep, stride);
+    assert(rep);
+    for (uint32_t r = 0; r < num_rep; r++)
+      ops_mix(&enc, d_enc, stride, K + r, rep + (size_t)r * stride);
+
+    if (K == 9) {
+      /* Dense binary elimination with K' = 10, ESI 9 through 16. */
+      const uint8_t first_bytes[] = {0xcc, 0xb7, 0x17, 0xdb,
+                                     0xce, 0xdb, 0xd9, 0x6b};
+      for (size_t r = 0; r < sizeof(first_bytes); r++)
+        assert(rep[r * stride] == first_bytes[r]);
+    }
+
+    nanorq_core dec = {0};
+    assert(nanorq_core_encoder_new_gf2(K, oh, &dec));
+    size_t dp_len = nanorq_core_calculate_prepare_memory(&dec);
+    uint8_t *dp = malloc(dp_len);
+    assert(dp && nanorq_core_generate(&dec, dp, dp_len));
+    uint32_t dec_rows = nanorq_core_get_pc_rows(&dec);
+    uint8_t *d_dec = calloc(dec_rows, stride);
+    assert(d_dec);
+
+    if (K == 9) {
+      precode_matrix_make_HDPC(&dec.P, &dec.W);
+      /* A duplicate source equation leaves the block one pivot short. */
+      nanorq_core_replace_symbol(&dec, 0, 1);
+      assert(nanorq_core_patch_matrix(&dec));
+      size_t len = nanorq_core_calculate_prepared_work_memory(&dec);
+      uint8_t *work = malloc(len);
+      assert(len && work);
+      assert(!nanorq_core_precalculate(&dec, work, len));
+      free(work);
+    }
+
+    uint32_t r_idx = 0;
+    for (uint32_t i = 0; i < K; i++) {
+      if (i < drops) {
+        nanorq_core_replace_symbol(&dec, i, K + r_idx);
+        nanorq_core_place_symbol(&dec, d_dec, stride, i,
+                                 rep + (size_t)r_idx * stride, T);
+        r_idx++;
+      } else {
+        nanorq_core_place_symbol(&dec, d_dec, stride, i,
+                                 src + (size_t)i * T, T);
+      }
+    }
+    for (uint32_t extra = 0; extra < oh; extra++) {
+      uint32_t row = dec.P.Kprime + extra;
+      nanorq_core_replace_symbol(&dec, row, K + r_idx);
+      nanorq_core_place_symbol(&dec, d_dec, stride, row,
+                               rep + (size_t)r_idx * stride, T);
+      r_idx++;
+    }
+    size_t ds_len = ops_estimate_schedule_bytes(K + oh);
+    void *ds_mem = malloc(ds_len);
+    schedule ds = {0};
+    assert(ds_mem && schedule_init(&ds, ds_mem, ds_len));
+    assert(nanorq_core_patch_matrix(&dec));
+    nanorq_core_set_op_callback(&dec, &ds, ops_push);
+    size_t dw_len = nanorq_core_calculate_prepared_work_memory(&dec);
+    uint8_t *dw = malloc(dw_len + 1);
+    assert(dw && nanorq_core_precalculate(&dec, dw + 1, dw_len) &&
+           !ds.overflowed && ds.cpidx == 2);
+    for (uint32_t idx = 0; idx < ds.ops.n; idx++)
+      assert(ds.ops.a[idx].u == 1);
+    ops_run(&dec, d_dec, stride, &ds);
+
+    uint8_t *out = malloc(stride);
+    assert(out);
+    for (uint32_t i = 0; i < K; i++) {
+      ops_mix(&dec, d_dec, stride, i, out);
+      assert(memcmp(out, src + (size_t)i * T, T) == 0);
+    }
+
+    free(out);
+    free(ds_mem);
+    free(dw);
+    free(d_dec);
+    free(dp);
+    free(rep);
+    free(src);
+    free(d_enc);
+    free(es_mem);
+    free(ew);
+    free(ep);
+  }
+}
+
 int main() {
   test_partition();
   test_sopi();
@@ -324,6 +457,7 @@ int main() {
   test_prepared_workspace();
   test_no_preconditioned_rows();
   test_large_matrix_offsets();
+  test_h0_gf2_mode();
   printf("All utility tests passed successfully!\n");
   return 0;
 }

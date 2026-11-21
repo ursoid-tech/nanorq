@@ -52,12 +52,13 @@ void nanorq_core_init(void) {
  * T: size of each symbol in bytes (should be aligned to Al)
  * K: number of symbols per block
  */
-bool nanorq_core_encoder_new(u32 K, u32 overhead, nanorq_core *rq) {
+static bool init_core_params(u32 K, u32 overhead, bool gf2_only,
+                             nanorq_core *rq) {
   if (!rq)
     return false;
   if (K < 1 || K > K_max)
     return false;
-  rq->P = params_init(K);
+  rq->P = gf2_only ? params_init_gf2(K) : params_init(K);
   if (overhead > UINT32_MAX - rq->P.L)
     return false;
   uint64_t rows = (uint64_t)rq->P.L + overhead;
@@ -68,6 +69,14 @@ bool nanorq_core_encoder_new(u32 K, u32 overhead, nanorq_core *rq) {
   rq->W.u = 0; /* active width unset until prepare or patch */
   nanorq_core_init();
   return true;
+}
+
+bool nanorq_core_encoder_new(u32 K, u32 overhead, nanorq_core *rq) {
+  return init_core_params(K, overhead, false, rq);
+}
+
+bool nanorq_core_encoder_new_gf2(u32 K, u32 overhead, nanorq_core *rq) {
+  return init_core_params(K, overhead, true, rq);
 }
 
 uint32_t nanorq_core_recommended_stride(uint32_t T) {
@@ -270,15 +279,21 @@ static size_t calculate_work_memory(nanorq_core *rq, u32 max_u) {
   /* field maps */
   if (!add_padded_bytes(&mem, rows, sizeof(u32), 2))
     return 0;
-  /* UL */
-  if (!add_padded_bytes(&mem, 2U * P->H, (size_t)u_stride * 32, 1))
-    return 0;
-  /* HDPC */
-  if (!add_padded_bytes(&mem, P->H, (P->Kprime + P->S + 31U) & ~31U, 1))
-    return 0;
-  /* add w->a to bump allocator */
-  if (!add_padded_bytes(&mem, P->Kprime + P->S, 1, 1))
-    return 0;
+  if (P->H > 0) {
+    /* UL */
+    if (!add_padded_bytes(&mem, 2U * P->H, (size_t)u_stride * 32, 1))
+      return 0;
+    /* HDPC */
+    if (!add_padded_bytes(&mem, P->H, (P->Kprime + P->S + 31U) & ~31U, 1))
+      return 0;
+    /* add w->a to bump allocator */
+    if (!add_padded_bytes(&mem, P->Kprime + P->S, 1, 1))
+      return 0;
+  } else {
+    /* initial arena alignment slack */
+    if (!add_bytes(&mem, 1, get_align_size()))
+      return 0;
+  }
   return (size_t)mem;
 }
 
@@ -312,15 +327,20 @@ static bool assign_work_memory(nanorq_core *rq, u8 *mem, size_t len) {
   if (!u32_vec_init(&W->F.type, a, W->rows, W->rows, 0))
     return false;
 
-  u32 u_aligned = u_stride * 32;
-  tmp = 2 * P->H * u_aligned;
-  if (!u8_vec_init(&W->UL, a, tmp, tmp, u_aligned))
-    return false;
+  if (P->H > 0) {
+    u32 u_aligned = u_stride * 32;
+    tmp = 2 * P->H * u_aligned;
+    if (!u8_vec_init(&W->UL, a, tmp, tmp, u_aligned))
+      return false;
 
-  u32 k_aligned = (P->Kprime + P->S + 31) & ~31;
-  tmp = P->H * k_aligned;
-  if (!u8_vec_init(&W->HDPC, a, tmp, tmp, k_aligned))
-    return false;
+    u32 k_aligned = (P->Kprime + P->S + 31) & ~31;
+    tmp = P->H * k_aligned;
+    if (!u8_vec_init(&W->HDPC, a, tmp, tmp, k_aligned))
+      return false;
+  } else {
+    W->UL = (u8_vec){0};
+    W->HDPC = (u8_vec){0};
+  }
   return true;
 }
 

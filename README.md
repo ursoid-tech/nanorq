@@ -7,6 +7,13 @@ nanorq is a compact, performant implementation of the raptorq fountain code capa
   - High-level API `nanorq.h` abstracts allocation, alignment, and I/O handling from the user.
   - Low-level API `nanorq_core.h` provides more flexibility and can be used without any libc dependency[^1], but requires more integration from the user.
 
+The core API also offers an XOR-only profile. Use
+`nanorq_core_encoder_new_gf2(K, overhead, &rq)` on both the encoder and the
+decoder. This profile omits HDPC rows and produces repair symbols that are
+incompatible with RFC 6330. Agree on the profile out of band. If the decoder
+receives dependent repairs, it needs additional independent symbols to recover
+the block.
+
 ## Performance[^2]
 ![](graph.png)
 
