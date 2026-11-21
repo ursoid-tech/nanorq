@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* compile high-level code directly to inject scratch allocation faults */
@@ -258,6 +259,11 @@ static bool repair_capacity_survives_reset(void) {
 
 static bool rank_failure_can_retry_after_growth(void) {
   enum { K = 10, T = 8 };
+  /* Each equation is independent of source ESI 0 for K=10. Together
+   * these fill the capped first attempt without recovering that symbol. */
+  const unsigned deficient[] = {142,  232,  244,  245,  375,  583,  848,
+                                868,  1184, 1503, 1984, 2400, 2546, 2802,
+                                2910, 3069, 3766, 4014, 4310};
   uint8_t source[K * T] = {0}, decoded[K * T], packet[T];
   struct ioctx *src_io = ioctx_from_mem_ro(source, sizeof(source));
   struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
@@ -274,12 +280,15 @@ static bool rank_failure_can_retry_after_growth(void) {
       CHECK(nanorq_decoder_add_symbol(dec, source + esi * T, nanorq_tag(0, esi),
                                       dec_io) == NANORQ_SYM_ADDED,
             "add known symbols before rank failure");
-    /* ESI 142 with source ESIs 1..9 is rank deficient for K=10 */
-    CHECK(nanorq_encode(enc, packet, 142, 0, src_io) == T,
-          "generate deficient equation");
-    CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, 142), dec_io) ==
-              NANORQ_SYM_ADDED,
-          "add deficient equation");
+    size_t count = trial == 0 ? 1 : sizeof(deficient) / sizeof(deficient[0]);
+    for (size_t i = 0; i < count; i++) {
+      unsigned esi = deficient[i];
+      CHECK(nanorq_encode(enc, packet, esi, 0, src_io) == T,
+            "generate deficient equation");
+      CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, esi),
+                                      dec_io) == NANORQ_SYM_ADDED,
+            "add deficient equation");
+    }
     for (unsigned retry = 0; retry < 2; retry++) {
       CHECK(!nanorq_repair_block(dec, dec_io, 0), "report deficient rank");
       CHECK(nanorq_num_missing(dec, 0) == 1, "preserve missing state");
@@ -438,11 +447,31 @@ static bool mmap_tracks_logical_size(void) {
   CHECK(io->size(io) == 0, "seek alone must not grow logical size");
   CHECK(io->write(io, &byte, 1) == 1 && io->size(io) == 101,
         "write grows mmap logical size");
+  uint8_t readback[2];
+  CHECK(io->seek(io, 100) && io->read(io, readback, sizeof(readback)) == 1 &&
+            readback[0] == byte,
+        "read from writable mmap stops at logical EOF");
+
+  /* Opening the output reserves one mapping window in the backing file. */
+  struct stat st;
+  CHECK(stat(path, &st) == 0 && st.st_size > 101, "get mmap window size");
+  size_t boundary = (size_t)st.st_size;
+  const uint8_t edge[] = {0x42, 0xc7};
+  CHECK(io->seek(io, boundary - 1) && io->write(io, edge, 1) == 1 &&
+            io->write(io, edge + 1, 1) == 1,
+        "consecutive mmap writes across a window boundary");
   io->destroy(io);
 
   io = ioctx_mmap_file(path, IOCTX_MODE_READ);
-  CHECK(io && io->size(io) == 101, "mmap output truncates to logical size");
-  CHECK(!io->seek(io, 102), "mmap read seek past EOF must fail");
+  CHECK(io && io->size(io) == boundary + 1,
+        "mmap output truncates to logical size");
+  CHECK(io->read(io, readback, 1) == 1 && readback[0] == 0,
+        "second mmap write preserves the start of the first window");
+  CHECK(io->seek(io, boundary - 1) && io->read(io, readback, 1) == 1 &&
+            io->read(io, readback + 1, 1) == 1 &&
+            memcmp(readback, edge, sizeof(edge)) == 0,
+        "consecutive mmap reads across a window boundary");
+  CHECK(!io->seek(io, boundary + 2), "mmap read seek past EOF must fail");
   io->destroy(io);
   unlink(path);
   return true;
@@ -517,6 +546,8 @@ static bool high_overhead_burst_repair(void) {
           "burst add repair");
   }
   CHECK(nanorq_repair_block(dec, dio, 0), "burst repair with large overhead");
+  CHECK(dec->encoders[0]->core.overhead == dec->encoders[0]->core.P.H + 8U,
+        "burst repair uses the capped equation set");
   CHECK(memcmp(src, dec_buf, sizeof(src)) == 0, "burst repair payload match");
   nanorq_free(dec);
   nanorq_free(enc);
@@ -567,7 +598,7 @@ static bool precalc_covers_unequal_blocks(void) {
   return true;
 }
 
-int main(void) {
+static bool run_regressions(void) {
   CHECK(reject_invalid_oti(), "invalid OTI regression");
   CHECK(grow_t_without_looping(), "T growth regression");
   CHECK(zero_pad_last_symbol(), "padding regression");
@@ -585,6 +616,12 @@ int main(void) {
   CHECK(tsnc_relay_large_k(), "tsnc large-k relay regression");
   CHECK(high_overhead_burst_repair(), "high-overhead burst repair regression");
   CHECK(precalc_covers_unequal_blocks(), "unequal-block precalc regression");
+  return true;
+}
+
+int main(void) {
+  if (!run_regressions())
+    return EXIT_FAILURE;
   puts("all API regressions passed");
   return EXIT_SUCCESS;
 }

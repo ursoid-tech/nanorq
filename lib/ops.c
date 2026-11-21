@@ -162,11 +162,13 @@ void nanorq_core_get_memory_reqs(uint32_t K, uint32_t overhead, uint32_t stride,
 
 bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
                                uint32_t num_repair, uint8_t *repair_out) {
-  if (!src_data || !repair_out || T == 0 || num_repair > UINT32_MAX - K ||
-      (size_t)num_repair > SIZE_MAX / T)
+  if (!src_data || !repair_out || T == 0 || (size_t)num_repair > SIZE_MAX / T)
     return false;
   nanorq_core rq = {0};
   if (!nanorq_core_encoder_new(K, 0, &rq))
+    return false;
+  /* Repair ESIs map to internal symbol IDs starting at Kprime. */
+  if (num_repair > UINT32_MAX - rq.P.Kprime + 1)
     return false;
 
   struct nanorq_core_mem_reqs reqs;

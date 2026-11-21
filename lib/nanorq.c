@@ -1165,8 +1165,7 @@ static bool attempt_conventional_repair(nanorq *rq, struct block_encoder *dec,
   bool success = false;
   *rank_failed = false;
 
-  if (overhead > UINT32_MAX - dec->K || !ensure_block_matrix(dec) ||
-      !nanorq_core_encoder_new(dec->K, overhead, &core))
+  if (!nanorq_core_encoder_new(dec->K, overhead, &core))
     goto out;
 
   size_t rows = nanorq_core_get_pc_rows(&core);
@@ -1234,9 +1233,11 @@ static bool attempt_conventional_repair(nanorq *rq, struct block_encoder *dec,
       *rank_failed = true;
       goto out;
     }
-    if (!dec->S.overflowed && dec->S.cpidx == 2)
+    if (dec->S.cpidx != 2)
+      goto out;
+    if (!dec->S.overflowed)
       break;
-    if (dec->S.cpidx > 2 || dec->sched_cap > SIZE_MAX / 2)
+    if (dec->S.ops.n < dec->S.ops.m || dec->sched_cap > SIZE_MAX / 2)
       goto out;
     size_t grown = dec->sched_cap * 2;
     sched_op *next = (sched_op *)realloc(dec->S.ops.a, grown);
@@ -1301,17 +1302,15 @@ bool nanorq_repair_block(nanorq *rq, struct ioctx *io, uint8_t sbn) {
     return false;
 
   uint32_t avail_oh = (uint32_t)(conventional_count - num_gaps);
-  /* keep initial overhead >= H + 8 to hit the pure-gf2 solver fast path
-   * without inflating D across hundreds of buffered burst/carousel packets */
+  /* Cap the first attempt at H + 8 extra equations. This permits the GF(2)
+   * fast path without sizing the matrix for an entire buffered burst. */
   uint32_t cap_oh = dec->core.P.H + 8U;
   uint32_t first_oh = avail_oh > cap_oh ? cap_oh : avail_oh;
   bool rank_failed = false;
 
-  if (attempt_conventional_repair(rq, dec, sbn, io, first_oh,
-                                  &rank_failed))
+  if (attempt_conventional_repair(rq, dec, sbn, io, first_oh, &rank_failed))
     return true;
   if (rank_failed && first_oh < avail_oh)
-    return attempt_conventional_repair(rq, dec, sbn, io, avail_oh,
-                                       &rank_failed);
+    return attempt_conventional_repair(rq, dec, sbn, io, avail_oh, &rank_failed);
   return false;
 }

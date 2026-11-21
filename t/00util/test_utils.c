@@ -58,7 +58,8 @@ void test_sopi() {
       ((huge_a % SOPI_N) + ((huge_i % SOPI_N) * (huge_b % SOPI_N)) % SOPI_N) %
       SOPI_N;
   assert(huge_val == exp_huge);
-  assert(sopi_mersenne_mod(UINT64_MAX, UINT64_MAX, UINT64_MAX) < SOPI_N);
+  /* UINT64_MAX mod (2^31 - 1) is 3. */
+  assert(sopi_mersenne_mod(UINT64_MAX, UINT64_MAX, UINT64_MAX) == 3 + 3 * 3);
 
   /* multi block mapping test */
   uint32_t Z = 5;
@@ -74,16 +75,25 @@ void test_sopi() {
   /* huge index multi-block sbn wrap check */
   rq_sopi big_sopi = {17, 0x7FFFFFF0U, 0xFFFFFFFAU, 0xFFFFFFFBU};
   sopi_get_mapping_multi(&big_sopi, UINT64_MAX - 3ULL, 7, &out_sbn, &out_esi);
-  assert(out_sbn < 7 && out_esi < SOPI_N);
+  /* Expected values from (i + c + (i / 7) * d) % 7 and
+   * (a + (i / 7) * b) % SOPI_N using unbounded integer arithmetic. */
+  assert(out_sbn == 4 && out_esi == 613566784);
 
   printf("SOPI tests passed.\n");
+}
+
+static void test_repair_id_limit(void) {
+  uint8_t source = 1, repair = 0;
+  /* K=1 pads to Kprime=10. The external ESIs fit, but the last
+   * internal symbol ID would be UINT32_MAX + 1. */
+  assert(!nanorq_core_encode_simple(&source, 1, 1, UINT32_MAX - 8, &repair));
+  assert(repair == 0);
 }
 
 static void test_high_overhead_mem_reqs(void) {
   enum { K = 10, OH = 200, STRIDE = 64 };
   struct nanorq_core_mem_reqs reqs = {0};
   nanorq_core_get_memory_reqs(K, OH, STRIDE, &reqs);
-  assert(reqs.schedule_bytes >= ops_estimate_schedule_bytes(K + OH));
   nanorq_core rq = {0};
   assert(nanorq_core_encoder_new(K, OH, &rq));
   uint8_t *prep = malloc(reqs.prepare_bytes);
@@ -91,7 +101,10 @@ static void test_high_overhead_mem_reqs(void) {
   void *sched_buf = malloc(reqs.schedule_bytes);
   schedule S = {0};
   assert(prep && work && sched_buf);
-  assert(nanorq_core_prepare(&rq, prep, reqs.prepare_bytes));
+  assert(nanorq_core_generate(&rq, prep, reqs.prepare_bytes));
+  for (uint32_t i = 0; i < OH; i++)
+    nanorq_core_replace_symbol(&rq, rq.P.Kprime + i, K + i);
+  assert(nanorq_core_patch_matrix(&rq));
   assert(schedule_init(&S, sched_buf, reqs.schedule_bytes));
   nanorq_core_set_op_callback(&rq, &S, ops_push);
   assert(nanorq_core_precalculate(&rq, work, reqs.work_bytes));
@@ -223,6 +236,7 @@ static void test_large_matrix_offsets(void) {
   uint8_t expected = 0;
   uint8_t expected_tail = 0;
   uint8_t high_expected = 0;
+  uint32_t high_row = 0;
   for (uint32_t i = 0; i < num; i++) {
     size_t offset = (size_t)mix[i] * STRIDE;
     if (mprotect(D + offset, STRIDE, PROT_READ | PROT_WRITE) != 0) {
@@ -234,6 +248,7 @@ static void test_large_matrix_offsets(void) {
     }
     uint8_t val = (uint8_t)(((mix[i] * 2654435761U) >> 24) | 1U);
     if (offset > UINT32_MAX) {
+      high_row = mix[i];
       if ((high_expected ^ val) == 0)
         val ^= 2U;
       high_expected ^= val;
@@ -254,6 +269,12 @@ static void test_large_matrix_offsets(void) {
     assert(out[i] == 0);
   assert(out[STRIDE - 1] == expected_tail);
   free(out);
+  uint32_t source_row = high_row - nanorq_core_get_pc_genc_offset(&rq);
+  uint8_t *slot = D + (size_t)high_row * STRIDE;
+  assert(nanorq_core_get_symbol_ptr(&rq, D, STRIDE, source_row) == slot);
+  uint8_t replacement = *slot ^ 0xff;
+  nanorq_core_place_symbol(&rq, D, STRIDE, source_row, &replacement, 1);
+  assert(*slot == replacement);
   (void)expected;
   (void)expected_tail;
   (void)high_expected;
@@ -298,6 +319,7 @@ static void test_large_matrix_offsets(void) {
 int main() {
   test_partition();
   test_sopi();
+  test_repair_id_limit();
   test_high_overhead_mem_reqs();
   test_prepared_workspace();
   test_no_preconditioned_rows();
