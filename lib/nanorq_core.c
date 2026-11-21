@@ -5,33 +5,6 @@
 
 #include <stdatomic.h>
 
-#if defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
-#include <riscv_vector.h>
-
-static void nanorq_axpyb32_rvv(u8 *a, u32 *b, u8 u, unsigned k) {
-  if (u == 0 || k == 0)
-    return;
-  const uint8_t *bm = (const uint8_t *)b;
-  unsigned i = 0;
-  unsigned bulk = k & ~7u;
-  while (i < bulk) {
-    size_t vl = __riscv_vsetvl_e8m2(bulk - i);
-    vl &= ~(size_t)7u;
-    if (vl == 0)
-      break;
-    vbool4_t mask = __riscv_vlm_v_b4(bm + (i >> 3), vl);
-    vuint8m2_t va = __riscv_vle8_v_u8m2(a + i, vl);
-    va = __riscv_vxor_vx_u8m2_mu(mask, va, va, u, vl);
-    __riscv_vse8_v_u8m2(a + i, va, vl);
-    i += (unsigned)vl;
-  }
-  for (; i < k; i++) {
-    if ((bm[i >> 3] >> (i & 7u)) & 1u)
-      a[i] ^= u;
-  }
-}
-#endif
-
 #define ALIGN_VAL(x, align) (((x) + (align) - 1) & ~((align) - 1))
 
 struct oblas_impl nanorq_oblas = {.align_size = 32};
@@ -61,15 +34,14 @@ static bool add_padded_bytes(size_t *total, size_t count, size_t unit,
 }
 
 void nanorq_core_init(void) {
+  if (atomic_load_explicit(&nanorq_oblas_state, memory_order_acquire) == 2)
+    return;
   unsigned expected = 0;
   if (atomic_compare_exchange_strong_explicit(&nanorq_oblas_state, &expected, 1,
                                               memory_order_acq_rel,
                                               memory_order_acquire)) {
     struct oblas_impl impl = {.align_size = 32};
     oblas_get_impl(&impl);
-#if defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
-    impl.axpyb32 = nanorq_axpyb32_rvv;
-#endif
     nanorq_oblas = impl;
     atomic_store_explicit(&nanorq_oblas_state, 2, memory_order_release);
     return;
@@ -97,8 +69,9 @@ static bool init_core_params(u32 K, u32 overhead, bool gf2_only,
     return false;
   rq->overhead = overhead;
   rq->W.u = 0; /* active width unset until prepare or patch */
-  rq->W.work_base = NULL;
-  rq->W.work_len = 0;
+  /* Before inversion, ops_mix accepts an already canonical matrix. */
+  rq->W.d.a = NULL;
+  rq->W.ci.a = NULL;
   nanorq_core_init();
   return true;
 }
@@ -231,8 +204,6 @@ bool nanorq_core_generate(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len) {
   if (!rq || !prep_mem || pm_len == 0)
     return false;
   rq->W.u = 0;
-  rq->W.work_base = NULL;
-  rq->W.work_len = 0;
   if (!assign_prepare_memory(rq, prep_mem, pm_len))
     return false;
   precode_matrix_gen(&rq->P, &rq->W);
@@ -278,8 +249,6 @@ void nanorq_core_replace_symbol(nanorq_core *rq, u32 row, u32 esi) {
     X += (P->Kprime - P->K);
   }
   W->u = 0;
-  W->work_base = NULL;
-  W->work_len = 0;
   uv_clear(W->A[row]);
   params_set_idxs(P, X, &W->A[row]);
 }
@@ -354,8 +323,6 @@ static bool assign_work_memory(nanorq_core *rq, u8 *mem, size_t len) {
   arena *a = &W->work_mem;
   a->beg = mem;
   a->end = mem + len;
-  W->work_base = mem;
-  W->work_len = len;
 
   u32 u_stride = DC(W->u, 32);
   tmp = W->rows * u_stride;

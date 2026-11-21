@@ -159,7 +159,7 @@ static void obl_axpyb32_ref(u8 *a, u32 *b, u8 u, unsigned k)
     }
 
 #define GENERATE_IMPL(suffix, attr, T, LOAD, STORE, INIT, CORE, XOR)         \
-    attr static void obl_axpy_##suffix(u8 *restrict a, u8 *restrict b, u8 u, unsigned k) \
+    attr static inline void obl_axpy_##suffix(u8 *restrict a, u8 *restrict b, u8 u, unsigned k) \
     {                                                                     \
         if (u == 1) {                                                      \
             OBL_SIMPLE_LOOP(0, T, LOAD, STORE, XOR);                        \
@@ -484,11 +484,17 @@ static void obl_scal_ref_wrapper(u8 *a, u8 u, unsigned k)
     obl_axiy_ref(a, a, u, k);
 }
 
+#include "oblas_fused.h"
+#include "oblas_row_ops.h"
+
 #define OBL_SET_IMPL(suffix, simd, b32, alignment)                        \
     *impl = (struct oblas_impl){                                         \
         .axpy = obl_axpy_##suffix, .scal = obl_scal_##suffix,              \
         .axiy = obl_axiy_##suffix, .axpyb32 = obl_axpyb32_##b32,           \
-        .align_size = (alignment), .swap = obl_swap_##simd }
+        .align_size = (alignment), .swap = obl_swap_##simd,               \
+        .row_ops = obl_row_ops_##suffix,                                 \
+        .axpy2 = obl_axpy2_##suffix, .axpy4 = obl_axpy4_##suffix,         \
+        .xor_set4 = obl_xor_set4_##simd, .xor_acc4 = obl_xor_acc4_##simd }
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -507,9 +513,15 @@ void oblas_get_impl(struct oblas_impl *impl)
     impl->axpyb32 = obl_axpyb32_ref;
     impl->align_size = sizeof(void *);
     impl->swap = obl_swap;
+    impl->row_ops = obl_row_ops_ref;
+    impl->axpy2 = obl_axpy2_ref;
+    impl->axpy4 = obl_axpy4_ref;
+    impl->xor_set4 = obl_xor_set4_ref;
+    impl->xor_acc4 = obl_xor_acc4_ref;
 
 #if defined(OBLAS_ARCH_X86)
-    int has_avx512 = __builtin_cpu_supports("avx512f") &&
+    int has_avx512 = __builtin_cpu_supports("avx2") &&
+                     __builtin_cpu_supports("avx512f") &&
                      __builtin_cpu_supports("avx512bw") &&
                      __builtin_cpu_supports("avx512dq") &&
                      __builtin_cpu_supports("avx512vl");
@@ -529,7 +541,7 @@ void oblas_get_impl(struct oblas_impl *impl)
 #elif defined(OBLAS_ARCH_ARM) && (defined(__ARM_NEON) || defined(_MSC_VER))
     OBL_SET_IMPL(neon, neon, neon, 16);
 #elif defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
-    OBL_SET_IMPL(rvv, rvv, ref, 16);
+    OBL_SET_IMPL(rvv, rvv, rvv, 16);
 #endif
 #ifdef _MSC_VER
 #pragma warning(pop)

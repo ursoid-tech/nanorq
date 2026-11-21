@@ -1,4 +1,5 @@
 #include "precode.h"
+#include "bitmap.h"
 
 #define hf_at(W, i, j)                                                         \
   (uv_A((W)->F.type, (i)) ? uv_E((W)->UL, uv_A((W)->F.rowmap, (i)), (j))       \

@@ -44,8 +44,6 @@ typedef struct _pc {
   arena prep_mem;
   uint8_t *AT_mem_beg;
   arena work_mem;
-  uint8_t *work_base;
-  size_t work_len;
 
   u32_vec *NZT;
   u32_vec *A;

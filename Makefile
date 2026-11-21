@@ -31,7 +31,8 @@ $(CORE_TEST_UTILS)\
 t/00util/test_utils\
 t/00util/api_regress\
 t/00util/test_oblas_swap\
-t/00util/test_oblas_kernels
+t/00util/test_oblas_kernels\
+t/00util/test_ops
 
 EXAMPLES=\
 examples/encode\
@@ -71,10 +72,13 @@ t/00util/precond: t/00util/precond.o $(CORE_OBJ)
 t/00util/ult: t/00util/ult.o $(CORE_OBJ)
 t/00util/schedgen: t/00util/schedgen.o $(CORE_OBJ)
 t/00util/test_utils: t/00util/test_utils.o $(CORE_OBJ)
+t/00util/test_ops: t/00util/test_ops.o $(CORE_OBJ)
 t/00util/api_regress.o: lib/nanorq.c
 t/00util/api_regress: t/00util/api_regress.o lib/io.o $(CORE_OBJ)
 t/00util/test_oblas_swap: t/00util/test_oblas_swap.o deps/obl/oblas_common.o
 t/00util/test_oblas_kernels.o: deps/obl/oblas_lite.c
+deps/obl/oblas_lite.o t/00util/test_oblas_kernels.o: deps/obl/oblas_fused.h deps/obl/oblas_row_ops.h
+lib/uvec.o lib/precode.o: lib/bitmap.h
 t/00util/test_oblas_kernels: t/00util/test_oblas_kernels.o deps/obl/oblas_common.o
 
 examples/encode: examples/encode.o $(OBJ)

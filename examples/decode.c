@@ -113,7 +113,7 @@ int main(int argc, char *argv[]) {
   }
 
   /* encode to get repair packets */
-  ops_run(&rq, D, stride, &S_enc);
+  ops_run_with_scratch(&rq, D, stride, &S_enc, work_mem, work_len);
 
   /* save repair packets */
   u8 *repair_pkts = NULL;
@@ -169,7 +169,7 @@ int main(int argc, char *argv[]) {
   }
 
   ops_start = now();
-  ops_run(&rq, D, stride, &S_dec);
+  ops_run_with_scratch(&rq, D, stride, &S_dec, work_mem, work_len);
   ops_end = now();
 
   int diffs = 0;

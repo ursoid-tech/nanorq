@@ -63,11 +63,6 @@ static inline u8 bm_at(u32_vec *v, u32 i, u32 j) {
   return (v->a[(size_t)i * v->s + j / 32] >> (j % 32)) & 1;
 }
 
-static inline void bm_xor_raw(u32 *restrict ap, const u32 *restrict bp, u32 s) {
-  for (u32 idx = 0; idx < s; idx++)
-    ap[idx] ^= bp[idx];
-}
-
 u8 bm_get(u32_vec *v, u32 i, u32 j);
 void bm_set(u32_vec *v, u32 i, u32 j);
 void bm_add(u32_vec *v, u32 i, u32 j);

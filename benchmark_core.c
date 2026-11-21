@@ -97,7 +97,7 @@ int main(int argc, char *argv[]) {
     uint64_t t_mid1 = usecs();
     t0 += (t_mid1 - t_mid0);
 
-    ops_run(&rq, D, stride, &S_enc);
+    ops_run_with_scratch(&rq, D, stride, &S_enc, work_mem, work_len);
     bytes += T * K;
   }
   double elapsed_encode = (usecs() - t0) / 1000000.0;
@@ -123,7 +123,7 @@ int main(int argc, char *argv[]) {
     uint64_t t_mid1 = usecs();
     t0 += (t_mid1 - t_mid0);
 
-    ops_run(&rq, D, stride, &S_enc);
+    ops_run_with_scratch(&rq, D, stride, &S_enc, work_mem, work_len);
     bytes += T * K;
   }
   double elapsed_precalc = (usecs() - t0) / 1000000.0;
@@ -131,7 +131,7 @@ int main(int argc, char *argv[]) {
   /* decode with no extra overhead */
   /* encode to compute intermediate symbols */
   memcpy(D, D_backup, mem);
-  ops_run(&rq, D, stride, &S_enc);
+  ops_run_with_scratch(&rq, D, stride, &S_enc, work_mem, work_len);
 
   int drops = (int)(K * expected_loss / 100.0);
   if (drops <= 0)
@@ -208,7 +208,8 @@ int main(int argc, char *argv[]) {
     t0 += (t_mid1 - t_mid0);
 
     t_start = usecs();
-    ops_run(&dec, D_dec, stride, &S_dec);
+    ops_run_with_scratch(&dec, D_dec, stride, &S_dec, dec_work_mem,
+                         dec_work_len);
     t_ops_run_dec += (usecs() - t_start) / 1000000.0;
 
     t_start = usecs();
@@ -323,7 +324,8 @@ int main(int argc, char *argv[]) {
     t0 += (t_mid1 - t_mid0);
 
     t_start = usecs();
-    ops_run(&dec_oh, D_dec_oh, stride, &S_dec_oh);
+    ops_run_with_scratch(&dec_oh, D_dec_oh, stride, &S_dec_oh, dec_oh_work_mem,
+                         dec_oh_work_len);
     t_ops_run += (usecs() - t_start) / 1000000.0;
 
     t_start = usecs();

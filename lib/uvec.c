@@ -2,7 +2,7 @@
 #define restrict __restrict
 #endif
 
-#include "uvec.h"
+#include "bitmap.h"
 #include "util.h"
 #include <stdbool.h>
 

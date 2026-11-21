@@ -91,7 +91,7 @@ int main(int argc, char *argv[]) {
   prepare_data_mat(D, argv[4], rows, T, K, SH, stride);
 
   ops_start = now();
-  ops_run(&rq, D, stride, &S);
+  ops_run_with_scratch(&rq, D, stride, &S, work_mem, work_len);
   ops_end = now();
 
   u8 *reppkt = (u8 *)malloc(stride);
