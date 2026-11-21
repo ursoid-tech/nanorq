@@ -23,23 +23,16 @@ typedef struct {
 bool schedule_init(schedule *S, void *buf, size_t buf_bytes);
 
 void ops_push(void *arg, u32 i, u32 j, u8 u);
-/* Replay requires the schedule and core preparation memory to remain live.
- * The inversion workspace may be freed or reused after precalculate.
- * D remains in physical row order; use ops_mix with this same core. */
+/* replay schedule on D; keep prepare memory live for ops_mix */
 void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S);
 
-/* Optional replay copy size, or zero when the optimization is not useful.
- * This is not a minimum memory requirement for ops_run. */
+/* optional replay scratch size, or 0 when unused */
 size_t ops_replay_scratch_bytes(nanorq_core *rq, uint32_t stride);
 
-/* Scratch is borrowed only for this call and its contents are overwritten.
- * It must not overlap the schedule or core preparation memory. The completed
- * inversion workspace may be explicitly reused here. Null, undersized, or
- * D-overlapping scratch falls back to ordinary replay. */
+/* replay schedule with optional disjoint scratch buffer */
 void ops_run_with_scratch(nanorq_core *rq, uint8_t *D, uint32_t stride,
                           schedule *S, void *scratch, size_t scratch_bytes);
-/* Output must be disjoint from D or exactly one complete matrix row.
- * Partial overlap is unsupported. */
+/* mix packet esi into ptr (disjoint from D or one exact row of D) */
 void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr);
 size_t ops_estimate_schedule_bytes(uint32_t K);
 

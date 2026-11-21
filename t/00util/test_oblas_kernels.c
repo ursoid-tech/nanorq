@@ -6,6 +6,43 @@
 
 enum { BUFFER_SIZE = 2200, PACKED_WORDS = (BUFFER_SIZE + 31) / 32 + 8 };
 
+typedef void (*axpy2_fn)(uint8_t *, uint8_t *, const uint8_t *, uint8_t,
+                         uint8_t, unsigned);
+typedef void (*axpy4_fn)(uint8_t *, uint8_t *, uint8_t *, uint8_t *,
+                         const uint8_t *, uint8_t, uint8_t, uint8_t, uint8_t,
+                         unsigned);
+
+struct kernel_suite {
+  struct oblas_impl impl;
+  axpy2_fn axpy2;
+  axpy4_fn axpy4;
+};
+
+#define WRAP_FUSED(suffix, attr)                                               \
+  attr static void test_axpy2_##suffix(u8 *d0, u8 *d1, const u8 *s, u8 u0,     \
+                                       u8 u1, unsigned k) {                    \
+    obl_axpy2_##suffix(d0, d1, s, u0, u1, k);                                  \
+  }                                                                            \
+  attr static void test_axpy4_##suffix(u8 *d0, u8 *d1, u8 *d2, u8 *d3,         \
+                                       const u8 *s, u8 u0, u8 u1, u8 u2,       \
+                                       u8 u3, unsigned k) {                    \
+    obl_axpy4_##suffix(d0, d1, d2, d3, s, u0, u1, u2, u3, k);                  \
+  }
+
+WRAP_FUSED(ref, )
+#if defined(OBLAS_ARCH_X86)
+WRAP_FUSED(ssse3_std, OBL_TGT_SSSE3)
+WRAP_FUSED(ssse3_gfni, OBL_TGT_SSSE3_GFNI)
+WRAP_FUSED(avx2_std, OBL_TGT_AVX2)
+WRAP_FUSED(avx2_gfni, OBL_TGT_AVX2_GFNI)
+WRAP_FUSED(avx512_std, OBL_TGT_AVX512)
+WRAP_FUSED(avx512_gfni, OBL_TGT_AVX512_GFNI)
+#elif defined(OBLAS_ARCH_ARM) && (defined(__ARM_NEON) || defined(_MSC_VER))
+WRAP_FUSED(neon, )
+#elif defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
+WRAP_FUSED(rvv, )
+#endif
+
 static const unsigned lengths[] = {
     0,    1,    2,    7,    8,    15,   16,   17,   31,   32,
     33,   63,   64,   65,   127,  128,  129,  255,  256,  257,
@@ -86,19 +123,19 @@ static void check(const char *name, struct oblas_impl impl) {
   printf("%s kernels passed\n", name);
 }
 
-/* Every possible equality pattern for four destinations/sources. */
+/* every equality pattern for four destinations/sources */
 static const unsigned aliases[][4] = {
     {0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 1, 0}, {0, 0, 1, 1}, {0, 0, 1, 2},
     {0, 1, 0, 0}, {0, 1, 0, 1}, {0, 1, 0, 2}, {0, 1, 1, 0}, {0, 1, 1, 1},
     {0, 1, 1, 2}, {0, 1, 2, 0}, {0, 1, 2, 1}, {0, 1, 2, 2}, {0, 1, 2, 3}};
 
-static void check_fanout_case(const char *name, struct oblas_impl impl,
+static void check_fanout_case(const char *name, struct kernel_suite suite,
                               unsigned len, unsigned off, unsigned alias,
                               const uint8_t coefficients[4]) {
   uint8_t rows[4][BUFFER_SIZE], expected[4][BUFFER_SIZE];
   uint8_t source[BUFFER_SIZE], original_source[BUFFER_SIZE];
   const unsigned *row = aliases[alias];
-  /* Different source and destination alignment catches shared-load mistakes. */
+  /* mismatch source and destination alignment */
   unsigned src_off = (off + 13) % 32;
   for (unsigned i = 0; i < BUFFER_SIZE; i++)
     source[i] = original_source[i] = (uint8_t)(i * 29 + i / 7);
@@ -111,12 +148,12 @@ static void check_fanout_case(const char *name, struct oblas_impl impl,
         expected[row[r]][off + i] ^=
             reference_products[coefficients[r]][source[src_off + i]];
     if (count == 2)
-      impl.axpy2(rows[row[0]] + off, rows[row[1]] + off, source + src_off,
-                 coefficients[0], coefficients[1], len);
+      suite.axpy2(rows[row[0]] + off, rows[row[1]] + off, source + src_off,
+                  coefficients[0], coefficients[1], len);
     else
-      impl.axpy4(rows[row[0]] + off, rows[row[1]] + off, rows[row[2]] + off,
-                 rows[row[3]] + off, source + src_off, coefficients[0],
-                 coefficients[1], coefficients[2], coefficients[3], len);
+      suite.axpy4(rows[row[0]] + off, rows[row[1]] + off, rows[row[2]] + off,
+                  rows[row[3]] + off, source + src_off, coefficients[0],
+                  coefficients[1], coefficients[2], coefficients[3], len);
     if (memcmp(rows, expected, sizeof(rows)) ||
         memcmp(source, original_source, sizeof(source))) {
       fprintf(stderr,
@@ -129,7 +166,9 @@ static void check_fanout_case(const char *name, struct oblas_impl impl,
   }
 }
 
-static void check_fanout(const char *name, struct oblas_impl impl) {
+static void check_fanout(const char *name, struct kernel_suite suite) {
+  if (!suite.axpy2 || !suite.axpy4)
+    return;
   static const uint8_t cases[][4] = {
       {0, 0, 0, 0},     {1, 1, 1, 1}, {0, 1, 127, 255},     {1, 0, 2, 0},
       {255, 127, 1, 0}, {2, 2, 2, 2}, {255, 255, 255, 255}, {128, 254, 3, 17}};
@@ -138,14 +177,14 @@ static void check_fanout(const char *name, struct oblas_impl impl) {
     for (unsigned o = 0; o < COUNT(offsets); o++)
       for (unsigned a = 0; a < COUNT(aliases); a++)
         for (unsigned c = 0; c < COUNT(cases); c++)
-          check_fanout_case(name, impl, lengths[n], offsets[o], a, cases[c]);
-  /* Odd multipliers visit every GF256 coefficient in every destination. */
+          check_fanout_case(name, suite, lengths[n], offsets[o], a, cases[c]);
+  /* odd multipliers visit every GF256 coefficient in every destination */
   for (unsigned c = 0; c < 256; c++) {
     uint8_t all_coefficients[] = {(uint8_t)c, (uint8_t)(c * 73 + 1),
                                   (uint8_t)(c * 151 + 19),
                                   (uint8_t)(c * 229 + 101)};
     for (unsigned n = 0; n < COUNT(coefficient_lengths); n++)
-      check_fanout_case(name, impl, coefficient_lengths[n],
+      check_fanout_case(name, suite, coefficient_lengths[n],
                         offsets[c % COUNT(offsets)], c % COUNT(aliases),
                         all_coefficients);
   }
@@ -167,7 +206,7 @@ static void check_xor4(const char *name, struct oblas_impl impl) {
         const uint8_t *src[4];
         for (unsigned r = 0; r < 4; r++) {
           unsigned shift = a < COUNT(aliases) ? aliases[alias][r] : r;
-          /* Exercise exact duplicates and partially overlapping sources. */
+          /* exercise exact duplicates and partially overlapping sources */
           src[r] = rows[aliases[alias][r]] + (off + shift * 7) % 32;
         }
         for (unsigned accumulate = 0; accumulate < 2; accumulate++) {
@@ -251,15 +290,18 @@ static void check_packed(const char *name, struct oblas_impl impl) {
                         offsets[c % COUNT(offsets)], c % 7, (uint8_t)c);
 }
 
-/* Exact allocations make overreads at vector tails visible to ASan. */
-static void check_bounds(const char *name, struct oblas_impl impl) {
+/* exact allocations expose vector tail overreads under ASan */
+static void check_bounds(const char *name, struct kernel_suite suite) {
+  struct oblas_impl impl = suite.impl;
   for (unsigned n = 0; n < COUNT(lengths); n++) {
     unsigned len = lengths[n];
     uint8_t *storage[5], *row[5];
     unsigned words = (len + 31) / 32;
     uint32_t *packed = malloc((words ? words : 1) * sizeof(*packed));
-    if (!packed)
+    uint8_t *mat_storage = malloc(5 * (size_t)len + 1);
+    if (!packed || !mat_storage)
       exit(1);
+    memset(mat_storage, 0xa5, 5 * (size_t)len + 1);
     for (unsigned i = 0; i < words; i++)
       packed[i] = UINT32_MAX;
     for (unsigned r = 0; r < 5; r++) {
@@ -269,16 +311,28 @@ static void check_bounds(const char *name, struct oblas_impl impl) {
       memset(storage[r], 0xa5, len + 1);
       row[r] = storage[r] + 1;
     }
+    struct oblas_row_op rops[4] = {
+        {1, 0, 4}, {255, 1, 4}, {127, 2, 4}, {2, 3, 4}};
+    impl.row_ops(mat_storage + 1, len, rops, 4, 0);
+    impl.row_ops(mat_storage + 1, len, rops, 4, 1);
     for (unsigned c = 0; c < COUNT(coefficients); c++) {
       uint8_t u = coefficients[c];
-      impl.axpy2(row[0], row[1], row[4], u, u, len);
-      impl.axpy4(row[0], row[1], row[2], row[3], row[4], u, u, u, u, len);
+      if (suite.axpy2 && suite.axpy4) {
+        suite.axpy2(row[0], row[1], row[4], u, u, len);
+        suite.axpy4(row[0], row[1], row[2], row[3], row[4], u, u, u, u, len);
+      }
       impl.axpyb32(row[0], packed, u, len);
     }
-    impl.axpy2(row[0], row[1], row[4], 1, 255, len);
-    impl.axpy4(row[0], row[1], row[2], row[3], row[4], 0, 1, 127, 255, len);
+    if (suite.axpy2 && suite.axpy4) {
+      suite.axpy2(row[0], row[1], row[4], 1, 255, len);
+      suite.axpy4(row[0], row[1], row[2], row[3], row[4], 0, 1, 127, 255, len);
+    }
     impl.xor_set4(row[0], row[1], row[2], row[3], row[4], len);
     impl.xor_acc4(row[0], row[1], row[2], row[3], row[4], len);
+    if (mat_storage[0] != 0xa5) {
+      fprintf(stderr, "%s row_ops wrote before matrix: length=%u\n", name, len);
+      exit(1);
+    }
     for (unsigned r = 0; r < 5; r++) {
       if (storage[r][0] != 0xa5) {
         fprintf(stderr, "%s wrote before a row: length=%u row=%u\n", name, len,
@@ -287,6 +341,7 @@ static void check_bounds(const char *name, struct oblas_impl impl) {
       }
       free(storage[r]);
     }
+    free(mat_storage);
     free(packed);
   }
 }
@@ -310,13 +365,12 @@ static void check_row_ops_case(const char *name, struct oblas_impl impl,
       coefficient = 255;
     ops[i] = (struct oblas_row_op){reverse ? 1 : coefficient, dest, source};
     if (!reverse && i % 11 == 8) {
-      /* Scales interrupt groups and consume only the low byte of j. */
+      /* scales interrupt groups and consume only the low byte of j */
       ops[i].u = 0;
       ops[i].j = 256u + (uint8_t)(trial + i * 37);
     }
   }
-  /* References execute one operation at a time, including dependencies on
-   * earlier destination rows and sequential writes to repeated destinations. */
+  /* execute reference ops sequentially, including repeated destinations */
   for (size_t step = 0; step < count; step++) {
     const struct oblas_row_op *op = &ops[reverse ? count - 1 - step : step];
     uint8_t *dst = ref + (size_t)op->i * stride;
@@ -349,61 +403,61 @@ static void check_row_ops(const char *name, struct oblas_impl impl) {
         for (int reverse = 0; reverse < 2; reverse++)
           check_row_ops_case(name, impl, lengths[n], offsets[o], counts[c],
                              n * 11 + o * 17 + c, reverse);
-  /* Sweep every GF256 coefficient, including scale-by-zero and scale-by-one. */
+  /* sweep every GF256 coefficient, including scale-by-zero and scale-by-one */
   for (unsigned c = 0; c < 256; c++)
     check_row_ops_case(name, impl, 65, offsets[c % COUNT(offsets)], 65, c, 0);
 }
 
-static void check_all(const char *name, struct oblas_impl impl) {
-  if (!impl.axpy2 || !impl.axpy4 || !impl.xor_set4 || !impl.xor_acc4 ||
-      !impl.axpyb32 || !impl.row_ops) {
+static void check_all(const char *name, struct kernel_suite suite) {
+  struct oblas_impl impl = suite.impl;
+  if (!impl.xor_set4 || !impl.xor_acc4 || !impl.axpyb32 || !impl.row_ops) {
     fprintf(stderr, "%s omitted a fused, packed-bit, or row-batch kernel\n",
             name);
     exit(1);
   }
   check(name, impl);
-  check_fanout(name, impl);
+  check_fanout(name, suite);
   check_xor4(name, impl);
   check_packed(name, impl);
-  check_bounds(name, impl);
+  check_bounds(name, suite);
   check_row_ops(name, impl);
   printf("%s fused, packed-bit, and row-batch kernels passed\n", name);
 }
 
 #define CHECK_BACKEND(suffix, simd)                                            \
   do {                                                                         \
-    struct oblas_impl impl = {0};                                              \
-    impl.axpy = obl_axpy_##suffix;                                             \
-    impl.axiy = obl_axiy_##suffix;                                             \
-    impl.swap = obl_swap_##simd;                                               \
-    impl.scal = obl_scal_##suffix;                                             \
-    impl.axpyb32 = obl_axpyb32_##simd;                                         \
-    impl.axpy2 = obl_axpy2_##suffix;                                           \
-    impl.axpy4 = obl_axpy4_##suffix;                                           \
-    impl.xor_set4 = obl_xor_set4_##simd;                                       \
-    impl.xor_acc4 = obl_xor_acc4_##simd;                                       \
-    impl.row_ops = obl_row_ops_##suffix;                                       \
-    check_all(#suffix, impl);                                                  \
+    struct kernel_suite suite = {0};                                           \
+    suite.impl.axpy = obl_axpy_##suffix;                                       \
+    suite.impl.axiy = obl_axiy_##suffix;                                       \
+    suite.impl.swap = obl_swap_##simd;                                         \
+    suite.impl.scal = obl_scal_##suffix;                                       \
+    suite.impl.axpyb32 = obl_axpyb32_##simd;                                   \
+    suite.impl.xor_set4 = obl_xor_set4_##simd;                                 \
+    suite.impl.xor_acc4 = obl_xor_acc4_##simd;                                 \
+    suite.impl.row_ops = obl_row_ops_##suffix;                                 \
+    suite.axpy2 = test_axpy2_##suffix;                                         \
+    suite.axpy4 = test_axpy4_##suffix;                                         \
+    check_all(#suffix, suite);                                                 \
   } while (0)
 
 int main(void) {
-  struct oblas_impl impl;
+  struct kernel_suite suite = {0};
   for (unsigned a = 0; a < 256; a++)
     for (unsigned b = 0; b < 256; b++)
       reference_products[a][b] = multiply((uint8_t)a, (uint8_t)b);
-  oblas_get_impl(&impl);
-  check_all("automatic", impl);
-  impl.axpy = obl_axpy_ref;
-  impl.axiy = obl_axiy_ref;
-  impl.scal = obl_scal_ref_wrapper;
-  impl.swap = obl_swap;
-  impl.axpyb32 = obl_axpyb32_ref;
-  impl.axpy2 = obl_axpy2_ref;
-  impl.axpy4 = obl_axpy4_ref;
-  impl.xor_set4 = obl_xor_set4_ref;
-  impl.xor_acc4 = obl_xor_acc4_ref;
-  impl.row_ops = obl_row_ops_ref;
-  check_all("scalar", impl);
+  oblas_get_impl(&suite.impl);
+  check_all("automatic", suite);
+  suite.impl.axpy = obl_axpy_ref;
+  suite.impl.axiy = obl_axiy_ref;
+  suite.impl.scal = obl_scal_ref_wrapper;
+  suite.impl.swap = obl_swap;
+  suite.impl.axpyb32 = obl_axpyb32_ref;
+  suite.impl.xor_set4 = obl_xor_set4_ref;
+  suite.impl.xor_acc4 = obl_xor_acc4_ref;
+  suite.impl.row_ops = obl_row_ops_ref;
+  suite.axpy2 = test_axpy2_ref;
+  suite.axpy4 = test_axpy4_ref;
+  check_all("scalar", suite);
 #if defined(OBLAS_ARCH_X86)
   if (__builtin_cpu_supports("ssse3"))
     CHECK_BACKEND(ssse3_std, ssse3);

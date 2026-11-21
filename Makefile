@@ -77,8 +77,6 @@ t/00util/api_regress.o: lib/nanorq.c
 t/00util/api_regress: t/00util/api_regress.o lib/io.o $(CORE_OBJ)
 t/00util/test_oblas_swap: t/00util/test_oblas_swap.o deps/obl/oblas_common.o
 t/00util/test_oblas_kernels.o: deps/obl/oblas_lite.c
-deps/obl/oblas_lite.o t/00util/test_oblas_kernels.o: deps/obl/oblas_fused.h deps/obl/oblas_row_ops.h
-lib/uvec.o lib/precode.o: lib/bitmap.h
 t/00util/test_oblas_kernels: t/00util/test_oblas_kernels.o deps/obl/oblas_common.o
 
 examples/encode: examples/encode.o $(OBJ)
@@ -130,9 +128,11 @@ gperf: clean benchmark
 ubsan: CC=clang
 ubsan: CFLAGS += -fsanitize=address,undefined
 ubsan: LDFLAGS += -fsanitize=address,undefined
-ubsan: clean benchmark t/00util/api_regress examples/tsnc_sync examples/tsnc_multipath examples/blockchain_gossip
+ubsan: clean benchmark t/00util/api_regress t/00util/test_oblas_kernels t/00util/test_ops examples/tsnc_sync examples/tsnc_multipath examples/blockchain_gossip
 	./benchmark 1280 50000 0
 	./t/00util/api_regress
+	./t/00util/test_oblas_kernels
+	./t/00util/test_ops
 	./examples/tsnc_sync
 	./examples/tsnc_multipath
 	./examples/blockchain_gossip

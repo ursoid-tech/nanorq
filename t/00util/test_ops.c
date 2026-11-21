@@ -26,13 +26,18 @@ static void *checked_malloc(size_t bytes) {
   return ptr;
 }
 
-static void fixture_init(struct fixture *f, uint32_t k, size_t min_work) {
+static void fixture_init(struct fixture *f, uint32_t k, uint32_t overhead,
+                         size_t min_work) {
   memset(f, 0, sizeof(*f));
-  CHECK(nanorq_core_encoder_new(k, 0, &f->rq), "initialize core");
+  CHECK(nanorq_core_encoder_new(k, overhead, &f->rq), "initialize core");
   size_t prep_bytes = nanorq_core_calculate_prepare_memory(&f->rq) + 64;
   f->prepare = checked_malloc(prep_bytes);
   CHECK(nanorq_core_prepare(&f->rq, f->prepare, prep_bytes), "prepare core");
-  size_t schedule_bytes = ops_estimate_schedule_bytes(k);
+  for (uint32_t extra = 0; extra < overhead; extra++)
+    nanorq_core_replace_symbol(&f->rq, f->rq.P.Kprime + extra, k + extra);
+  if (overhead > 0)
+    CHECK(nanorq_core_patch_matrix(&f->rq), "patch overhead core");
+  size_t schedule_bytes = ops_estimate_schedule_bytes(k + overhead);
   f->schedule_mem = checked_malloc(schedule_bytes);
   CHECK(schedule_init(&f->schedule, f->schedule_mem, schedule_bytes),
         "initialize schedule");
@@ -52,7 +57,7 @@ static void fixture_free(struct fixture *f) {
   free(f->prepare);
 }
 
-/* Deliberately independent of OBL's multiplication tables and kernels. */
+/* independent of OBL tables and kernels */
 static uint8_t multiply(uint8_t a, uint8_t b) {
   unsigned result = 0, x = a;
   for (unsigned bit = 0; bit < 8; bit++) {
@@ -113,7 +118,7 @@ static void compare_schedule(nanorq_core *rq, schedule *s, uint32_t stride) {
   uint8_t *reference = checked_malloc(bytes + 16);
   fill_bytes(storage, bytes + 16);
   memcpy(reference, storage, bytes + 16);
-  /* Offset the base too: SIMD rows and tails must tolerate unaligned data. */
+  /* offset base to test unaligned SIMD rows and tails */
   ops_run(rq, storage + 5, stride, s);
   reference_replay(reference + 5, stride, s);
   CHECK(memcmp(storage, reference, bytes + 16) == 0,
@@ -131,8 +136,7 @@ static void check_mixing(struct fixture *f, uint32_t stride) {
   uint8_t *output = checked_malloc(stride + 16);
   uint8_t *reference = checked_malloc(stride + 16);
   fill_bytes(d, bytes);
-  /* Materialize the logical matrix using c and d, independently of the
-   * inverse-column lookup used by ops_mix. */
+  /* materialize logical matrix using c and d independently of ci */
   bool permuted = false;
   for (uint32_t pos = 0; pos < rq->P.L; pos++) {
     uint32_t col = rq->W.c.a[pos], row = rq->W.d.a[pos];
@@ -175,35 +179,45 @@ static void check_mixing(struct fixture *f, uint32_t stride) {
   free(d);
 }
 
-static void canonical_mixing_after_construction(void) {
+static void canonical_mixing_before_inversion(void) {
   enum { STRIDE = 65 };
   nanorq_core rq;
-  /* Constructors must establish their own optional permutation state. */
+  /* constructors must establish deterministic state without caller zeroing */
   memset(&rq, 0xa5, sizeof(rq));
   CHECK(nanorq_core_encoder_new(10, 0, &rq), "canonical mixing core");
+  CHECK(!nanorq_core_patch_matrix(&rq), "unprepared core rejects patch");
+  size_t prep_bytes = nanorq_core_calculate_prepare_memory(&rq);
+  uint8_t *prep_mem = checked_malloc(prep_bytes);
   size_t bytes = (size_t)nanorq_core_get_pc_rows(&rq) * STRIDE;
   uint8_t *d = checked_malloc(bytes);
   uint8_t actual[STRIDE], expected[STRIDE];
   fill_bytes(d, bytes);
-  for (uint32_t esi = 0; esi < rq.P.K + 20; esi++) {
-    uint32_t mix[GENC_MAX];
-    uint32_t count = nanorq_core_get_packet_mix(&rq, esi, mix, GENC_MAX);
-    memset(expected, 0, sizeof(expected));
-    for (uint32_t idx = 0; idx < count; idx++)
-      for (uint32_t byte = 0; byte < STRIDE; byte++)
-        expected[byte] ^= d[(size_t)mix[idx] * STRIDE + byte];
-    ops_mix(&rq, d, STRIDE, esi, actual);
-    CHECK(memcmp(actual, expected, STRIDE) == 0,
-          "new core mixes canonical rows without a permutation");
+  for (unsigned stage = 0; stage < 3; stage++) {
+    if (stage == 1)
+      CHECK(nanorq_core_generate(&rq, prep_mem, prep_bytes), "generate core");
+    else if (stage == 2)
+      CHECK(nanorq_core_prepare(&rq, prep_mem, prep_bytes), "prepare core");
+    for (uint32_t esi = 0; esi < rq.P.K + 20; esi++) {
+      uint32_t mix[GENC_MAX];
+      uint32_t count = nanorq_core_get_packet_mix(&rq, esi, mix, GENC_MAX);
+      memset(expected, 0, sizeof(expected));
+      for (uint32_t idx = 0; idx < count; idx++)
+        for (uint32_t byte = 0; byte < STRIDE; byte++)
+          expected[byte] ^= d[(size_t)mix[idx] * STRIDE + byte];
+      ops_mix(&rq, d, STRIDE, esi, actual);
+      CHECK(memcmp(actual, expected, STRIDE) == 0,
+            "uninverted core mixes canonical rows");
+    }
   }
   free(d);
+  free(prep_mem);
 }
 
 static void small_replay_and_mixing(void) {
   static const uint32_t strides[] = {1,  2,  7,  15,  16,  17,  31,  32,  33,
                                      63, 64, 65, 127, 128, 129, 257, 1281};
   struct fixture f;
-  fixture_init(&f, 64, 0);
+  fixture_init(&f, 64, 0, 0);
   free(f.work);
   f.work = NULL;
   for (size_t idx = 0; idx < sizeof(strides) / sizeof(strides[0]); idx++) {
@@ -212,9 +226,7 @@ static void small_replay_and_mixing(void) {
   }
   fixture_free(&f);
 
-  /* Exercise four- and two-destination batches, repeated destinations,
-   * source dependencies, scaling, and coefficient changes. Checkpoints split
-   * batches deliberately so no grouping may cross a phase boundary. */
+  /* test 4- and 2-way batches, repeated destinations, scales, and splits */
   sched_op operations[] = {{1, 1, 0},   {1, 2, 0},   {1, 3, 0},    {1, 4, 0},
                            {1, 5, 0},   {1, 6, 0},   {1, 7, 0},    {1, 8, 0},
                            {1, 8, 0},   {1, 0, 8},   {73, 9, 1},   {73, 10, 1},
@@ -247,14 +259,14 @@ static void reject_invalid_checkpoints(void) {
 
 static void large_workspace_and_scratch(void) {
   nanorq_core shape = {0};
-  CHECK(nanorq_core_encoder_new(10, 0, &shape), "large matrix shape");
+  CHECK(nanorq_core_encoder_new(10, 2, &shape), "large matrix shape");
   uint32_t rows = nanorq_core_get_pc_rows(&shape);
-  /* Large symbols reach the replay threshold with a small, fast schedule. */
+  /* reach the replay threshold with a small, fast schedule */
   uint32_t stride = (((16U << 20) / rows + 63U) & ~63U) + 1;
   size_t bytes = (size_t)rows * stride;
   CHECK(bytes > (16U << 20), "exercise large-matrix replay optimization");
   struct fixture f;
-  fixture_init(&f, 10, bytes);
+  fixture_init(&f, 10, 2, bytes);
   size_t scratch_bytes = ops_replay_scratch_bytes(&f.rq, stride);
   CHECK(scratch_bytes >= bytes, "large replay reports optional scratch size");
   uint8_t *input = checked_malloc(bytes);
@@ -266,7 +278,7 @@ static void large_workspace_and_scratch(void) {
   fill_bytes(input, bytes);
   memcpy(reference, input, bytes);
 
-  /* Callers may immediately repurpose inversion workspace for other data. */
+  /* callers may immediately repurpose inversion workspace for other data */
   memset(f.work, 0xa5, f.work_bytes);
   ops_run(&f.rq, reference, stride, &f.schedule);
   CHECK(all_bytes(f.work, f.work_bytes, 0xa5),
@@ -317,7 +329,7 @@ static void large_workspace_and_scratch(void) {
 }
 
 int main(void) {
-  canonical_mixing_after_construction();
+  canonical_mixing_before_inversion();
   small_replay_and_mixing();
   reject_invalid_checkpoints();
   large_workspace_and_scratch();

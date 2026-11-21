@@ -41,17 +41,16 @@ void ops_run_with_scratch(nanorq_core *rq, uint8_t *D, uint32_t stride,
   void (*row_ops)(u8 *, unsigned, const struct oblas_row_op *, size_t, int) =
       nanorq_oblas.row_ops;
 
-  /* Skip phase-1 undo only when the caller explicitly provides a copy buffer.
-   * The inversion workspace is no longer implicitly borrowed after solving. */
+  /* skip phase-1 undo when caller provides a disjoint copy buffer */
   size_t mat_bytes = ops_replay_scratch_bytes(rq, stride);
-  if (scratch && rq->W.d.a && mat_bytes && scratch_bytes >= mat_bytes) {
+  if (scratch && rq->W.inverted && mat_bytes && scratch_bytes >= mat_bytes) {
     uintptr_t a = (uintptr_t)scratch, b = (uintptr_t)D;
     bool disjoint = a < b ? b - a >= mat_bytes : a - b >= mat_bytes;
     if (disjoint) {
       uint8_t *bkp = (uint8_t *)scratch;
       memcpy(bkp, D, mat_bytes);
       row_ops(bkp, stride, S->ops.a, S->cp[1], 0);
-      for (u32 pos = rq->W.i; pos < rq->P.L; pos++) {
+      for (u32 pos = rq->W.i; pos < rq->W.rows; pos++) {
         u32 drow = uv_A(rq->W.d, pos);
         memcpy(D + (size_t)drow * stride, bkp + (size_t)drow * stride, stride);
       }
@@ -83,15 +82,15 @@ void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
   }
   nanorq_core_init();
 
-  /* Resolve logical intermediate symbols through the core that inverted D. */
-  if (rq->W.d.a && rq->W.ci.a) {
+  /* resolve logical intermediate symbols through the inverting core */
+  if (rq->W.inverted) {
     for (u32 it = 0; it < num; it++)
       mix[it] = uv_A(rq->W.d, uv_A(rq->W.ci, mix[it]));
   }
 
   for (u32 it = 0; it < num; it++) {
     if (ptr == D + (size_t)mix[it] * stride) {
-      /* Read every input byte before overwriting an aliased source row. */
+      /* read every input byte before overwriting an aliased source row */
       for (u32 col = 0; col < stride; col++) {
         u8 value = 0;
         for (u32 n = 0; n < num; n++)

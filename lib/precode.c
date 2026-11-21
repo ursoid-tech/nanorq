@@ -1,5 +1,4 @@
 #include "precode.h"
-#include "bitmap.h"
 
 #define hf_at(W, i, j)                                                         \
   (uv_A((W)->F.type, (i)) ? uv_E((W)->UL, uv_A((W)->F.rowmap, (i)), (j))       \
@@ -192,16 +191,14 @@ static void precode_matrix_precond(params *P, pc *W) {
 }
 
 static void precode_matrix_fwd_GE(pc *W, u32 s, u32 e) {
-  u32 u_s = W->U.s;
   for (u32 row = 0; row < W->i; row++) {
     u32 mv = s < row ? row : s;
-    u32 drow = uv_A(W->d, row);
-    const u32 *src = W->U.a + (size_t)drow * u_s;
     u32_vec cs = W->AT[uv_A(W->c, row)];
     for (u32 it = 0; it < uv_size(cs); it++) {
       u32 tmp = uv_A(cs, it), h = uv_A(W->di, tmp);
       if (h > mv && h < e) {
-        bm_xor_raw(W->U.a + (size_t)tmp * u_s, src, u_s);
+        u32 drow = uv_A(W->d, row);
+        bm_add(&W->U, tmp, drow);
         W->cb.on_op(W->cb.on_op_arg, tmp, drow, 1);
       }
     }
@@ -317,8 +314,7 @@ static int precode_matrix_solve_gf2(params *P, pc *W) {
       u32 ddrow = uv_A(W->d, del_row);
       if (bm_at(&W->U, ddrow, col) == 0)
         continue;
-      bm_xor_raw(W->U.a + (size_t)ddrow * W->U.s,
-                 W->U.a + (size_t)drow * W->U.s, W->U.s);
+      bm_add(&W->U, ddrow, drow);
       W->cb.on_op(W->cb.on_op_arg, ddrow, drow, 1);
     }
   }
@@ -385,6 +381,7 @@ bool precode_matrix_prepare(params *P, pc *W) {
 
 int precode_matrix_invert(params *P, pc *W) {
   assert((W->i + W->u) == P->L);
+  W->inverted = false;
 
   precode_matrix_make_U(P, W);
 
@@ -402,5 +399,6 @@ int precode_matrix_invert(params *P, pc *W) {
   }
   W->cb.on_op(W->cb.on_op_arg, 0, 0, 0);
   precode_matrix_backsolve(P, W);
+  W->inverted = true;
   return 1;
 }

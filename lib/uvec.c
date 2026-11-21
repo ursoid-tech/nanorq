@@ -2,7 +2,7 @@
 #define restrict __restrict
 #endif
 
-#include "bitmap.h"
+#include "uvec.h"
 #include "util.h"
 #include <stdbool.h>
 
@@ -47,7 +47,10 @@ void bm_set(u32_vec *v, u32 i, u32 j) {
 
 void bm_add(u32_vec *v, u32 i, u32 j) {
   u32 s = v->s;
-  bm_xor_raw(v->a + (size_t)i * s, v->a + (size_t)j * s, s);
+  u32 *restrict ap = v->a + (size_t)i * s;
+  u32 *restrict bp = v->a + (size_t)j * s;
+  for (u32 idx = 0; idx < s; idx++)
+    ap[idx] ^= bp[idx];
 }
 
 void bm_fill(u32_vec *v, u32 i, u8 *dst) {

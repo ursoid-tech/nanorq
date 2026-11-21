@@ -438,7 +438,7 @@ static bool scratch_allocation_failures_can_retry(void) {
   return true;
 }
 
-/* A cached encoder schedule must not replace a decoded block's permutation. */
+/* cached encoder schedule must not replace a decoded block permutation */
 static bool decoded_blocks_keep_their_permutation(void) {
   enum { K = 10, T = 19 };
   uint8_t source[K * T] = {0}, decoded[K * T], packet[T], expected[T];
@@ -487,7 +487,7 @@ static bool decoded_blocks_keep_their_permutation(void) {
       nanorq_encoder_reset(enc, 0);
       nanorq_encoder_reset(dec, 0);
     }
-    /* After reset, generation may use the cached encoder core instead. */
+    /* after reset, generation may use the cached encoder core instead */
     CHECK(nanorq_generate_symbols(dec, 0, src_io),
           "generate symbols after decoded block reset");
     CHECK(nanorq_encode(dec, packet, 0, 0, src_io) == T &&
@@ -501,7 +501,7 @@ static bool decoded_blocks_keep_their_permutation(void) {
   return true;
 }
 
-/* Reject only the optional matrix copy, allowing ordinary solver workspace. */
+/* reject only the optional matrix copy, allowing ordinary solver workspace */
 static bool replay_scratch_allocation_is_optional(void) {
   enum { K = 256, T = 65535 };
   size_t bytes = (size_t)K * T;

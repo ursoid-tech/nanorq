@@ -28,6 +28,7 @@ typedef struct _pc {
   u32 cols;
   u32 i; /* dim of X submatrix */
   u32 u; /* remaining cols */
+  bool inverted;
 
   u32_vec nz;  /* non zero count per row */
   u32_vec cnz; /* non zero count per col */

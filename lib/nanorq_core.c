@@ -60,18 +60,14 @@ static bool init_core_params(u32 K, u32 overhead, bool gf2_only,
     return false;
   if (K < 1 || K > K_max)
     return false;
-  rq->P = gf2_only ? params_init_gf2(K) : params_init(K);
-  if (overhead > UINT32_MAX - rq->P.L)
+  params P = gf2_only ? params_init_gf2(K) : params_init(K);
+  if (overhead > UINT32_MAX - P.L)
     return false;
-  uint64_t rows = (uint64_t)rq->P.L + overhead;
-  uint64_t u_stride = DC(rq->P.L, 32);
+  uint64_t rows = (uint64_t)P.L + overhead;
+  uint64_t u_stride = DC(P.L, 32);
   if (rows * u_stride > UINT32_MAX)
     return false;
-  rq->overhead = overhead;
-  rq->W.u = 0; /* active width unset until prepare or patch */
-  /* Before inversion, ops_mix accepts an already canonical matrix. */
-  rq->W.d.a = NULL;
-  rq->W.ci.a = NULL;
+  *rq = (nanorq_core){.P = P, .overhead = overhead};
   nanorq_core_init();
   return true;
 }
@@ -204,6 +200,7 @@ bool nanorq_core_generate(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len) {
   if (!rq || !prep_mem || pm_len == 0)
     return false;
   rq->W.u = 0;
+  rq->W.inverted = false;
   if (!assign_prepare_memory(rq, prep_mem, pm_len))
     return false;
   precode_matrix_gen(&rq->P, &rq->W);
@@ -249,6 +246,7 @@ void nanorq_core_replace_symbol(nanorq_core *rq, u32 row, u32 esi) {
     X += (P->Kprime - P->K);
   }
   W->u = 0;
+  W->inverted = false;
   uv_clear(W->A[row]);
   params_set_idxs(P, X, &W->A[row]);
 }
@@ -259,6 +257,7 @@ bool nanorq_core_patch_matrix(nanorq_core *rq) {
   pc *W = &rq->W;
   if (!W->cnz.a || !W->nz.a || !W->NZT)
     return false;
+  W->inverted = false;
 
   for (u32 i = 0; i < W->cols; i++) {
     uv_A(W->cnz, i) = 0;
@@ -353,6 +352,7 @@ static bool assign_work_memory(nanorq_core *rq, u8 *mem, size_t len) {
 bool nanorq_core_precalculate(nanorq_core *rq, u8 *work_mem, size_t wm_len) {
   if (!rq || !work_mem || wm_len == 0)
     return false;
+  rq->W.inverted = false;
   if (!assign_work_memory(rq, work_mem, wm_len))
     return false;
   return precode_matrix_invert(&rq->P, &rq->W);

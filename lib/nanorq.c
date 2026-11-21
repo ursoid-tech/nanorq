@@ -550,7 +550,7 @@ static bool reserve_scratch(uint8_t **mem, size_t *capacity, size_t bytes) {
   return true;
 }
 
-/* The replay copy is optional: failure must not prevent solving the block. */
+/* optional replay copy; fall back to required solver workspace */
 static bool reserve_work_scratch(nanorq_core *core, uint32_t stride,
                                  uint8_t **mem, size_t *capacity) {
   size_t required = nanorq_core_calculate_prepared_work_memory(core);
