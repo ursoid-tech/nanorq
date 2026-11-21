@@ -18,7 +18,8 @@ void nanorq_core_init(void);
 /* returns a new encoder configured with given parameters */
 bool nanorq_core_encoder_new(uint32_t K, uint32_t overhead, nanorq_core *rq);
 
-/* opt-in pure-GF(2) (H=0, no HDPC) encoder/decoder for slack channels */
+/* XOR-only profile (H=0). Both peers must select this constructor to exchange
+ * its non-RFC repair symbols. Use the initialized core to size its arenas. */
 #define NANORQ_HAS_GF2_MODE 1
 bool nanorq_core_encoder_new_gf2(uint32_t K, uint32_t overhead,
                                  nanorq_core *rq);
@@ -55,7 +56,7 @@ bool nanorq_core_precalculate(nanorq_core *rq, uint8_t *work_mem,
 /* recommended row stride for t, accounting for simd and cache-line aliasing. */
 uint32_t nanorq_core_recommended_stride(uint32_t T);
 
-/* memory requirements for k, overhead, and stride. */
+/* memory requirements for the default RFC 6330 profile. */
 struct nanorq_core_mem_reqs {
   size_t prepare_bytes;
   size_t work_bytes;

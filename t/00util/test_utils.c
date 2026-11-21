@@ -317,11 +317,11 @@ static void test_large_matrix_offsets(void) {
 }
 
 static void test_h0_gf2_mode(void) {
-  const uint32_t ks[] = {10, 100, 256, 1000};
+  const uint32_t ks[] = {1, 9, 10, 100, 256, 1000};
   const uint32_t T = 64;
   for (size_t t = 0; t < sizeof(ks) / sizeof(*ks); t++) {
     uint32_t K = ks[t];
-    uint32_t drops = K / 10 > 0 ? K / 10 : 2;
+    uint32_t drops = K < 10 ? 1 : K / 10;
     uint32_t oh = K / 20 > 16 ? K / 20 : 16;
 
     nanorq_core enc = {0};
@@ -345,13 +345,19 @@ static void test_h0_gf2_mode(void) {
     uint32_t stride = nanorq_core_recommended_stride(T);
     uint32_t enc_rows = nanorq_core_get_pc_rows(&enc);
     uint8_t *d_enc = calloc(enc_rows, stride);
-    uint8_t *src = malloc((size_t)K * stride);
+    uint8_t *src = malloc((size_t)K * T);
     assert(d_enc && src);
-    for (size_t i = 0; i < (size_t)K * stride; i++)
-      src[i] = (uint8_t)((i * 131U + K) ^ (i >> 5));
-    for (uint32_t i = 0; i < K; i++)
-      nanorq_core_place_symbol(&enc, d_enc, stride, i, src + (size_t)i * stride,
-                               T);
+    uint32_t state = 1;
+    for (uint32_t i = 0; i < K; i++) {
+      uint8_t *symbol = src + (size_t)i * T;
+      symbol[0] = (uint8_t)(73U * i + 19U);
+      symbol[1] = (uint8_t)(i >> 8);
+      for (uint32_t j = 2; j < T; j++) {
+        state = 1664525U * state + 1013904223U;
+        symbol[j] = (uint8_t)(state >> 24);
+      }
+      nanorq_core_place_symbol(&enc, d_enc, stride, i, symbol, T);
+    }
     ops_run(&enc, d_enc, stride, &es);
 
     uint32_t num_rep = drops + oh;
@@ -359,6 +365,14 @@ static void test_h0_gf2_mode(void) {
     assert(rep);
     for (uint32_t r = 0; r < num_rep; r++)
       ops_mix(&enc, d_enc, stride, K + r, rep + (size_t)r * stride);
+
+    if (K == 9) {
+      /* Dense binary elimination with K' = 10, ESI 9 through 16. */
+      const uint8_t first_bytes[] = {0xcc, 0xb7, 0x17, 0xdb,
+                                     0xce, 0xdb, 0xd9, 0x6b};
+      for (size_t r = 0; r < sizeof(first_bytes); r++)
+        assert(rep[r * stride] == first_bytes[r]);
+    }
 
     nanorq_core dec = {0};
     assert(nanorq_core_encoder_new_gf2(K, oh, &dec));
@@ -369,6 +383,18 @@ static void test_h0_gf2_mode(void) {
     uint8_t *d_dec = calloc(dec_rows, stride);
     assert(d_dec);
 
+    if (K == 9) {
+      precode_matrix_make_HDPC(&dec.P, &dec.W);
+      /* A duplicate source equation leaves the block one pivot short. */
+      nanorq_core_replace_symbol(&dec, 0, 1);
+      assert(nanorq_core_patch_matrix(&dec));
+      size_t len = nanorq_core_calculate_prepared_work_memory(&dec);
+      uint8_t *work = malloc(len);
+      assert(len && work);
+      assert(!nanorq_core_precalculate(&dec, work, len));
+      free(work);
+    }
+
     uint32_t r_idx = 0;
     for (uint32_t i = 0; i < K; i++) {
       if (i < drops) {
@@ -378,7 +404,7 @@ static void test_h0_gf2_mode(void) {
         r_idx++;
       } else {
         nanorq_core_place_symbol(&dec, d_dec, stride, i,
-                                 src + (size_t)i * stride, T);
+                                 src + (size_t)i * T, T);
       }
     }
     for (uint32_t extra = 0; extra < oh; extra++) {
@@ -398,13 +424,15 @@ static void test_h0_gf2_mode(void) {
     uint8_t *dw = malloc(dw_len + 1);
     assert(dw && nanorq_core_precalculate(&dec, dw + 1, dw_len) &&
            !ds.overflowed && ds.cpidx == 2);
+    for (uint32_t idx = 0; idx < ds.ops.n; idx++)
+      assert(ds.ops.a[idx].u == 1);
     ops_run(&dec, d_dec, stride, &ds);
 
     uint8_t *out = malloc(stride);
     assert(out);
-    for (uint32_t i = 0; i < drops; i++) {
+    for (uint32_t i = 0; i < K; i++) {
       ops_mix(&dec, d_dec, stride, i, out);
-      assert(memcmp(out, src + (size_t)i * stride, T) == 0);
+      assert(memcmp(out, src + (size_t)i * T, T) == 0);
     }
 
     free(out);

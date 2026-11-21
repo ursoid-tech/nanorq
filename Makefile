@@ -163,6 +163,7 @@ check-embedded:
 
 valgrind: CFLAGS = -O0 -g -std=c11 -Wall -I. -Iinclude -Ideps/ -fPIC
 valgrind: clean $(TEST_UTILS) $(EXAMPLES)
+	valgrind --leak-check=full --errors-for-leak-kinds=definite --error-exitcode=2 ./t/00util/test_utils
 	valgrind --leak-check=full --errors-for-leak-kinds=definite --error-exitcode=2 ./t/00util/api_regress
 	valgrind --leak-check=full --errors-for-leak-kinds=definite --error-exitcode=2 ./examples/tsnc_sync > /dev/null
 	valgrind --leak-check=full --errors-for-leak-kinds=definite --error-exitcode=2 ./examples/tsnc_multipath > /dev/null

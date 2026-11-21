@@ -33,7 +33,9 @@ static void precode_matrix_make_LDPC2(u32_vec *A, u32 W, u32 S, u32 P) {
 void precode_matrix_make_HDPC(params *P, pc *W) {
   u32 m = P->H, n = P->Kprime + P->S, col = n - 1;
 
-  assert(m > 0 && n > 0);
+  if (m == 0)
+    return;
+  assert(n > 0);
 
   for (u32 row = 0; row < m; row++)
     uv_E(W->HDPC, row, col) = OCT_EXP[row];
