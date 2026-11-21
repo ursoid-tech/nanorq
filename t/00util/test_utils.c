@@ -172,51 +172,6 @@ static void test_no_preconditioned_rows(void) {
   free(prep);
 }
 
-#if SIZE_MAX > UINT32_MAX && defined(MAP_ANONYMOUS) && defined(PROT_NONE)
-/* trace operations without touching GiB-sized rows */
-static uint8_t *offset_matrix;
-static size_t offset_call;
-static const unsigned offset_stride = 1U << 30;
-static const struct {
-  char kind;
-  unsigned i, j, u;
-} offset_calls[] = {
-    {'a', 4, 5, 1},                 /* forward */
-    {'s', 5, 0, 2}, {'s', 5, 0, 2}, /* undo */
-    {'a', 4, 5, 1}, {'a', 5, 4, 3}, /* backsolve */
-    {'s', 4, 0, 7}, {'a', 4, 5, 1}, /* reapply */
-    {'s', 5, 0, 2}, {'w', 0, 0, 0}, /* rows */
-    {'w', 1, 1, 0}, {'w', 2, 2, 0}, {'w', 3, 3, 0}, {'w', 4, 5, 0},
-    {'w', 4, 4, 0}, {'w', 0, 4, 0}, /* cols */
-    {'w', 0, 0, 0}, {'w', 1, 1, 0}, {'w', 2, 2, 0}, {'w', 3, 3, 0},
-};
-
-static void check_offset_call(char kind, uint8_t *dst, uint8_t *src, unsigned u,
-                              unsigned len) {
-  assert(offset_call < sizeof(offset_calls) / sizeof(*offset_calls));
-  assert(kind == offset_calls[offset_call].kind);
-  assert((kind == 's') == (src == NULL));
-  assert(u == offset_calls[offset_call].u && len == offset_stride);
-  assert(dst == offset_matrix + (size_t)offset_calls[offset_call].i * len);
-  if (src)
-    assert(src == offset_matrix + (size_t)offset_calls[offset_call].j * len);
-  offset_call++;
-}
-
-static void check_offset_axpy(uint8_t *dst, uint8_t *src, uint8_t u,
-                              unsigned len) {
-  check_offset_call('a', dst, src, u, len);
-}
-
-static void check_offset_scal(uint8_t *dst, uint8_t u, unsigned len) {
-  check_offset_call('s', dst, NULL, u, len);
-}
-
-static void check_offset_swap(uint8_t *dst, uint8_t *src, unsigned len) {
-  check_offset_call('w', dst, src, 0, len);
-}
-#endif
-
 static void test_large_matrix_offsets(void) {
 #if SIZE_MAX > UINT32_MAX && defined(MAP_ANONYMOUS) && defined(PROT_NONE)
   enum { STRIDE = 131072 };
@@ -279,34 +234,63 @@ static void test_large_matrix_offsets(void) {
   (void)expected_tail;
   (void)high_expected;
 
-  /* six synthetic rows with 1 GiB stride cross the 32-bit offset boundary */
-  assert(bytes >= (size_t)6 * offset_stride);
-  uint32_t rows[] = {0, 1, 2, 3, 5, 4};
-  uint32_t cols[] = {4, 1, 2, 3, 0};
-  const uint32_t saved_rows[] = {0, 1, 2, 3, 5, 4};
-  const uint32_t saved_cols[] = {4, 1, 2, 3, 0};
-  nanorq_core scheduled = {.P.L = 5, .overhead = 1};
+  /* Exercise the real replay kernels on rows starting at the 4 GiB boundary.
+   * Build identity pivots except for a row swap and a column swap. */
+  enum { HI = (UINT64_C(1) << 32) / STRIDE, ROWS = HI + 6 };
+  uint8_t *high = D + (size_t)HI * STRIDE;
+  assert(bytes >= (size_t)ROWS * STRIDE);
+  if (mprotect(D, STRIDE, PROT_READ | PROT_WRITE) != 0 ||
+      mprotect(high, 6 * STRIDE, PROT_READ | PROT_WRITE) != 0) {
+    int unmapped = munmap(D, bytes);
+    assert(unmapped == 0);
+    (void)unmapped;
+    puts("SKIP: large replay offsets (mprotect unavailable)");
+    return;
+  }
+  memset(D, 0xab, STRIDE);
+  memset(high, 0, 6 * STRIDE);
+  memset(high, 1, STRIDE);
+  memset(high + STRIDE, 2, STRIDE);
+  uint32_t *rows = malloc(ROWS * sizeof(*rows));
+  uint32_t *cols = malloc(ROWS * sizeof(*cols));
+  assert(rows && cols);
+  for (uint32_t i = 0; i < ROWS; i++)
+    rows[i] = cols[i] = i;
+  rows[HI] = HI + 1;
+  rows[HI + 1] = HI;
+  cols[0] = HI;
+  cols[HI] = 0;
+  nanorq_core scheduled = {.P.L = ROWS - 1, .overhead = 1};
   scheduled.W.di.a = rows;
   scheduled.W.c.a = cols;
-  sched_op operations[] = {{1, 4, 5}, {0, 5, 2}, {3, 5, 4}, {0, 4, 7}};
-  schedule S = {
-      .cp = {2, 2},
-      .cpidx = 2,
-      .ops = {.a = operations, .n = 4, .m = 4},
-  };
-  struct oblas_impl saved = nanorq_oblas;
-  nanorq_oblas.axpy = check_offset_axpy;
-  nanorq_oblas.scal = check_offset_scal;
-  nanorq_oblas.swap = check_offset_swap;
-  offset_matrix = D;
-  offset_call = 0;
-  ops_run(&scheduled, D, offset_stride, &S);
-  nanorq_oblas = saved;
-  assert(offset_call == sizeof(offset_calls) / sizeof(*offset_calls));
-  assert(memcmp(rows, saved_rows, sizeof(rows)) == 0);
-  assert(memcmp(cols, saved_cols, sizeof(cols)) == 0);
-  (void)saved_rows;
-  (void)saved_cols;
+  sched_op operations[] = {
+      {1, HI, HI + 1}, {0, HI + 1, 2}, {3, HI + 1, HI}, {0, HI, 7},
+      {1, HI + 2, HI}, {1, HI + 3, HI}, {1, HI + 4, HI}, {1, HI + 5, HI},
+      {1, HI + 4, HI + 1}, {1, HI + 5, HI + 1}};
+  schedule S = {.cp = {2, 2},
+                .cpidx = 2,
+                .ops = {.a = operations,
+                        .n = sizeof(operations) / sizeof(operations[0])}};
+  ops_run(&scheduled, D, STRIDE, &S);
+
+  /* The first two high rows become (11, 8) after reverse replay, (49, 21)
+   * after backsolve and (36, 42) after reapplication. Permute both pivots. */
+  static const uint8_t expected_rows[] = {0xab, 36, 49, 49, 36, 36};
+  for (size_t i = 0; i < STRIDE; i++) {
+    assert(D[i] == 42);
+    for (size_t r = 0; r < sizeof(expected_rows); r++)
+      assert(high[r * STRIDE + i] == expected_rows[r]);
+  }
+  assert(rows[HI] == HI + 1 && rows[HI + 1] == HI);
+  assert(cols[0] == HI && cols[HI] == 0);
+  for (uint32_t i = 0; i < ROWS; i++) {
+    if (i != HI && i != HI + 1)
+      assert(rows[i] == i);
+    if (i != 0 && i != HI)
+      assert(cols[i] == i);
+  }
+  free(cols);
+  free(rows);
   int unmapped = munmap(D, bytes);
   assert(unmapped == 0);
   (void)unmapped;

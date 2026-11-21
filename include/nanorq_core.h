@@ -49,7 +49,7 @@ size_t nanorq_core_calculate_work_memory(nanorq_core *rq);
 /* exact workspace bound after prepare or patch */
 size_t nanorq_core_calculate_prepared_work_memory(nanorq_core *rq);
 
-/* precalculate rq matrix inversion */
+/* precalculate rq matrix inversion; work_mem may be freed after this call */
 bool nanorq_core_precalculate(nanorq_core *rq, uint8_t *work_mem,
                               size_t wm_len);
 

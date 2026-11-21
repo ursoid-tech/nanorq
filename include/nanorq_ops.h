@@ -3,11 +3,7 @@
 #ifndef NANORQ_OPS_H
 #define NANORQ_OPS_H
 
-typedef struct {
-  u8 u;
-  u32 i;
-  u32 j;
-} sched_op;
+typedef struct oblas_row_op sched_op;
 
 typedef struct {
   sched_op *a;
@@ -22,13 +18,21 @@ typedef struct {
   oplist ops;
 } schedule;
 
-/* initialise schedule with caller memory. buf needs
- * ops_estimate_schedule_bytes(k). */
+/* For generated schedules, allocate the schedule_bytes returned by
+ * nanorq_core_get_memory_reqs for the block and its overhead. */
 bool schedule_init(schedule *S, void *buf, size_t buf_bytes);
 
 void ops_push(void *arg, u32 i, u32 j, u8 u);
+/* Replay a schedule and place intermediate symbols in canonical row order. */
 void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S);
+/* Mix canonical rows into ptr (disjoint from D or one exact row of D). */
 void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr);
+
+/* Faster paired operations that leave D in pivot order. Keep the inverting
+ * core and its prepare memory live until the last call to ops_mix_pivoted. */
+bool ops_run_pivoted(uint8_t *D, uint32_t stride, schedule *S);
+void ops_mix_pivoted(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi,
+                     u8 *ptr);
 size_t ops_estimate_schedule_bytes(uint32_t K);
 
 /* mem reqs are defined in nanorq_core.h */

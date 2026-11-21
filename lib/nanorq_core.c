@@ -34,6 +34,8 @@ static bool add_padded_bytes(size_t *total, size_t count, size_t unit,
 }
 
 void nanorq_core_init(void) {
+  if (atomic_load_explicit(&nanorq_oblas_state, memory_order_acquire) == 2)
+    return;
   unsigned expected = 0;
   if (atomic_compare_exchange_strong_explicit(&nanorq_oblas_state, &expected, 1,
                                               memory_order_acq_rel,
@@ -58,15 +60,14 @@ static bool init_core_params(u32 K, u32 overhead, bool gf2_only,
     return false;
   if (K < 1 || K > K_max)
     return false;
-  rq->P = gf2_only ? params_init_gf2(K) : params_init(K);
-  if (overhead > UINT32_MAX - rq->P.L)
+  params P = gf2_only ? params_init_gf2(K) : params_init(K);
+  if (overhead > UINT32_MAX - P.L)
     return false;
-  uint64_t rows = (uint64_t)rq->P.L + overhead;
-  uint64_t u_stride = DC(rq->P.L, 32);
+  uint64_t rows = (uint64_t)P.L + overhead;
+  uint64_t u_stride = DC(P.L, 32);
   if (rows * u_stride > UINT32_MAX)
     return false;
-  rq->overhead = overhead;
-  rq->W.u = 0; /* active width unset until prepare or patch */
+  *rq = (nanorq_core){.P = P, .overhead = overhead};
   nanorq_core_init();
   return true;
 }
@@ -85,12 +86,13 @@ uint32_t nanorq_core_recommended_stride(uint32_t T) {
   if (align == 0 || T > UINT32_MAX - (align - 1))
     return 0;
   uint32_t padded = ALIGN_VAL(T, align);
-  /* avoid cache-line aliasing: if padded is an exact multiple of 64, add one
-   * alignment unit */
-  if (padded % 64 == 0) {
-    if (padded > UINT32_MAX - align)
+  /* pad past 2 KiB multiples to avoid L1D cache-set aliasing while preserving
+   * 64-byte cache-line alignment */
+  if (padded >= 2048U && (padded & 2047U) == 0) {
+    uint32_t step = align >= 64U ? align : 64U;
+    if (padded > UINT32_MAX - step)
       return 0;
-    padded += align;
+    padded += step;
   }
   return padded;
 }

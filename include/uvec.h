@@ -60,7 +60,7 @@ bool u32_vec_reserve(u32_vec *v, arena *a, u32 m);
 
 /* inline bitmap access without debug checks */
 static inline u8 bm_at(u32_vec *v, u32 i, u32 j) {
-  return (v->a[i * v->s + j / 32] >> (j % 32)) & 1;
+  return (v->a[(size_t)i * v->s + j / 32] >> (j % 32)) & 1;
 }
 
 u8 bm_get(u32_vec *v, u32 i, u32 j);

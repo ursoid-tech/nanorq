@@ -31,7 +31,8 @@ $(CORE_TEST_UTILS)\
 t/00util/test_utils\
 t/00util/api_regress\
 t/00util/test_oblas_swap\
-t/00util/test_oblas_kernels
+t/00util/test_oblas_kernels\
+t/00util/test_ops
 
 EXAMPLES=\
 examples/encode\
@@ -63,6 +64,7 @@ benchmark_latency: benchmark_latency.o $(OBJ)
 t/00util/interop: t/00util/interop.o libnanorq.a
 
 $(CORE_OBJ) lib/nanorq.o t/00util/test_oblas_kernels.o: deps/obl/oblas_lite.h
+deps/obl/oblas_lite.o t/00util/test_oblas_kernels.o: deps/obl/oblas_rows.inc
 
 t/00util/matgen: t/00util/matgen.o $(CORE_OBJ)
 t/00util/repgen: t/00util/repgen.o $(CORE_OBJ)
@@ -71,6 +73,7 @@ t/00util/precond: t/00util/precond.o $(CORE_OBJ)
 t/00util/ult: t/00util/ult.o $(CORE_OBJ)
 t/00util/schedgen: t/00util/schedgen.o $(CORE_OBJ)
 t/00util/test_utils: t/00util/test_utils.o $(CORE_OBJ)
+t/00util/test_ops: t/00util/test_ops.o $(CORE_OBJ)
 t/00util/api_regress.o: lib/nanorq.c
 t/00util/api_regress: t/00util/api_regress.o lib/io.o $(CORE_OBJ)
 t/00util/test_oblas_swap: t/00util/test_oblas_swap.o deps/obl/oblas_common.o
@@ -126,9 +129,11 @@ gperf: clean benchmark
 ubsan: CC=clang
 ubsan: CFLAGS += -fsanitize=address,undefined
 ubsan: LDFLAGS += -fsanitize=address,undefined
-ubsan: clean benchmark t/00util/api_regress examples/tsnc_sync examples/tsnc_multipath examples/blockchain_gossip
+ubsan: clean benchmark t/00util/api_regress t/00util/test_oblas_kernels t/00util/test_ops examples/tsnc_sync examples/tsnc_multipath examples/blockchain_gossip
 	./benchmark 1280 50000 0
 	./t/00util/api_regress
+	./t/00util/test_oblas_kernels
+	./t/00util/test_ops
 	./examples/tsnc_sync
 	./examples/tsnc_multipath
 	./examples/blockchain_gossip

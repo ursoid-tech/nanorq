@@ -30,3 +30,4 @@ examples/tsnc_sync
 t/00util/api_regress
 t/00util/test_oblas_swap
 t/00util/test_oblas_kernels
+t/00util/test_ops

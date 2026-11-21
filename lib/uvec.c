@@ -39,7 +39,7 @@ bool u32_vec_reserve(u32_vec *v, arena *a, u32 m) {
 u8 bm_get(u32_vec *v, u32 i, u32 j) { return bm_at(v, i, j); }
 
 void bm_set(u32_vec *v, u32 i, u32 j) {
-  u32 *a = v->a + i * v->s;
+  u32 *a = v->a + (size_t)i * v->s;
   u32 q = j / 32;
   u32 r = j % 32;
   a[q] ^= (1U << r);
@@ -47,15 +47,15 @@ void bm_set(u32_vec *v, u32 i, u32 j) {
 
 void bm_add(u32_vec *v, u32 i, u32 j) {
   u32 s = v->s;
-  u32 *restrict ap = v->a + i * s;
-  u32 *restrict bp = v->a + j * s;
+  u32 *restrict ap = v->a + (size_t)i * s;
+  u32 *restrict bp = v->a + (size_t)j * s;
   for (u32 idx = 0; idx < s; idx++)
     ap[idx] ^= bp[idx];
 }
 
 void bm_fill(u32_vec *v, u32 i, u8 *dst) {
   u32 s = v->s;
-  u32 *restrict ap = v->a + i * s;
+  u32 *restrict ap = v->a + (size_t)i * s;
   for (u32 idx = 0; idx < s; idx++) {
     u32 tmp = ap[idx];
     while (tmp > 0) {

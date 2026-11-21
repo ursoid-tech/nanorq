@@ -429,6 +429,69 @@ static bool scratch_allocation_failures_can_retry(void) {
   return true;
 }
 
+/* cached encoder schedule must not replace a decoded block permutation */
+static bool decoded_blocks_keep_their_permutation(void) {
+  enum { K = 10, T = 19 };
+  uint8_t source[K * T] = {0}, decoded[K * T], packet[T], expected[T];
+  struct ioctx *src_io = ioctx_from_mem_ro(source, sizeof(source));
+  struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
+  nanorq *enc = nanorq_encoder_new_ex(sizeof(source), T, K, 1, 1);
+  CHECK(src_io && dec_io && enc, "re-encode setup");
+  for (unsigned timing = 0; timing < 3; timing++) {
+    nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
+                                     nanorq_oti_scheme_specific(enc));
+    CHECK(dec, "re-encode decoder setup");
+    if (timing == 1)
+      CHECK(nanorq_precalculate(dec), "precalculate before decoding");
+    for (unsigned trial = 0; trial < 2; trial++) {
+      for (size_t i = 0; i < sizeof(source); i++)
+        source[i] = (uint8_t)(i * 29U + trial * 37U + 7U);
+      memset(decoded, 0, sizeof(decoded));
+      for (unsigned esi = 1; esi < K; esi++)
+        CHECK(nanorq_decoder_add_symbol(dec, source + esi * T,
+                                        nanorq_tag(0, esi),
+                                        dec_io) == NANORQ_SYM_ADDED,
+              "add source before re-encoding");
+      CHECK(nanorq_encode(enc, packet, K, 0, src_io) == T,
+            "generate re-encoding equation");
+      CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, K), dec_io) ==
+                NANORQ_SYM_ADDED,
+            "add re-encoding equation");
+      struct ioctx failing = {.write = fail_write,
+                              .seek = fail_seek,
+                              .writable = true,
+                              .seekable = true};
+      CHECK(!nanorq_repair_block(dec, &failing, 0),
+            "retain inverted block after output failure");
+      if (timing == 2)
+        CHECK(nanorq_precalculate(dec), "precalculate after decoding");
+      CHECK(nanorq_repair_block(dec, dec_io, 0), "finish decoded block output");
+      CHECK(memcmp(source, decoded, sizeof(source)) == 0,
+            "decoded block matches source");
+      for (unsigned esi = 0; esi < K + 20; esi++) {
+        CHECK(nanorq_encode(enc, expected, esi, 0, src_io) == T &&
+                  nanorq_encode(dec, packet, esi, 0, dec_io) == T,
+              "re-encode source and repair symbols");
+        CHECK(memcmp(packet, expected, T) == 0,
+              "decoded block must retain its inversion permutation");
+      }
+      nanorq_encoder_reset(enc, 0);
+      nanorq_encoder_reset(dec, 0);
+    }
+    /* after reset, generation may use the cached encoder core instead */
+    CHECK(nanorq_generate_symbols(dec, 0, src_io),
+          "generate symbols after decoded block reset");
+    CHECK(nanorq_encode(dec, packet, 0, 0, src_io) == T &&
+              memcmp(packet, source, T) == 0,
+          "reset chooses the new inversion permutation");
+    nanorq_free(dec);
+  }
+  nanorq_free(enc);
+  dec_io->destroy(dec_io);
+  src_io->destroy(src_io);
+  return true;
+}
+
 static bool mmap_tracks_logical_size(void) {
   char path[] = "/tmp/nanorq-io-XXXXXX";
   int fd = mkstemp(path);
@@ -572,7 +635,7 @@ static bool precalc_covers_unequal_blocks(void) {
         "both partition block sizes must be precalculated");
   nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
                                    nanorq_oti_scheme_specific(enc));
-  CHECK(dec, "precalc unequal decoder");
+  CHECK(dec && nanorq_precalculate(dec), "precalc unequal decoder");
   for (unsigned sbn = 0; sbn < 2; sbn++) {
     unsigned K = nanorq_block_symbols(enc, sbn);
     CHECK(nanorq_generate_symbols(enc, sbn, src_io), "generate via precalc");
@@ -588,6 +651,11 @@ static bool precalc_covers_unequal_blocks(void) {
             "add unequal precalc");
     }
     CHECK(nanorq_repair_block(dec, dec_io, sbn), "repair unequal precalc");
+    uint8_t reencoded[T];
+    CHECK(nanorq_encode(enc, packet, K + 1, sbn, src_io) == T &&
+              nanorq_encode(dec, reencoded, K + 1, sbn, dec_io) == T &&
+              memcmp(packet, reencoded, T) == 0,
+          "re-encode unequal block using its decoder permutation");
   }
   CHECK(memcmp(source, decoded, sizeof(source)) == 0,
         "unequal precalc roundtrip");
@@ -612,6 +680,8 @@ static bool run_regressions(void) {
   CHECK(unequal_blocks_use_contiguous_io(), "unequal direct I/O regression");
   CHECK(scratch_allocation_failures_can_retry(),
         "scratch allocation retry regression");
+  CHECK(decoded_blocks_keep_their_permutation(),
+        "decoded re-encoding regression");
   CHECK(mmap_tracks_logical_size(), "mmap logical size regression");
   CHECK(tsnc_relay_large_k(), "tsnc large-k relay regression");
   CHECK(high_overhead_burst_repair(), "high-overhead burst repair regression");
