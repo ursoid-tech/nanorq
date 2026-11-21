@@ -376,6 +376,8 @@ int precode_matrix_invert(params *P, pc *W) {
     rank = precode_matrix_solve_gf2(P, W);
 
   if (rank < P->L) {
+    if (P->H == 0)
+      return 0;
     precode_matrix_fill_HDPC(P, W);
     rank = precode_matrix_solve_gf256(P, W);
     if (rank < P->L)

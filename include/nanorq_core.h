@@ -18,6 +18,11 @@ void nanorq_core_init(void);
 /* returns a new encoder configured with given parameters */
 bool nanorq_core_encoder_new(uint32_t K, uint32_t overhead, nanorq_core *rq);
 
+/* opt-in pure-GF(2) (H=0, no HDPC) encoder/decoder for slack channels */
+#define NANORQ_HAS_GF2_MODE 1
+bool nanorq_core_encoder_new_gf2(uint32_t K, uint32_t overhead,
+                                 nanorq_core *rq);
+
 /* return the amount of memory required for preconditioning */
 size_t nanorq_core_calculate_prepare_memory(nanorq_core *rq);
 

@@ -21,6 +21,7 @@ typedef struct {
 } params;
 
 params params_init(u32 symbols);
+params params_init_gf2(u32 symbols);
 u32 params_set_idxs(params *P, u32 X, u32_vec *v);
 
 #endif

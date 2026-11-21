@@ -42,6 +42,49 @@ params params_init(u32 K) {
   return P;
 }
 
+params params_init_gf2(u32 K) {
+  params P = {0};
+  u32 idx = 0;
+
+  for (u32 i = 0; i < K_padded_size; i++) {
+    if (K <= K_padded[i]) {
+      idx = i;
+      break;
+    }
+  }
+
+  P.K = K;
+  P.Kprime = K_padded[idx];
+  P.J = (J_K_padded[idx] + J_gf2_delta[idx]) & 1023U;
+  P.S = S_H_W[idx][0];
+  u32 orig_H = S_H_W[idx][1];
+  u32 orig_W = S_H_W[idx][2];
+  u32 orig_P = (P.Kprime + P.S + orig_H) - orig_W;
+
+  P.H = 0;
+  P.L = P.Kprime + P.S;
+
+  u32 target_P = (orig_P > orig_H) ? (orig_P - orig_H) : 0;
+  if (target_P < 10)
+    target_P = 10;
+  if (target_P + P.S + 4 > P.L)
+    target_P = P.L - (P.S + 4);
+  u32 w = P.L - target_P;
+  while (w > P.S + 2 && !is_prime(w))
+    w--;
+
+  P.W = w;
+  P.P = P.L - P.W;
+  P.U = P.P;
+  P.B = P.W - P.S;
+  P.P1 = P.P;
+
+  while (!is_prime(P.P1))
+    P.P1++;
+
+  return P;
+}
+
 u32 params_set_idxs(params *P, u32 X, u32_vec *dst) {
   u32 num = 0;
   tuple t = gen_tuple(X, P);
