@@ -58,6 +58,10 @@ benchmark: benchmark.o $(OBJ)
 
 benchmark_core: benchmark_core.o $(CORE_OBJ)
 
+benchmark_latency: benchmark_latency.o $(OBJ)
+
+t/00util/interop: t/00util/interop.o libnanorq.a
+
 $(CORE_OBJ) lib/nanorq.o t/00util/test_oblas_kernels.o: deps/obl/oblas_lite.h
 
 t/00util/matgen: t/00util/matgen.o $(CORE_OBJ)
@@ -95,11 +99,12 @@ libnanorq_core.a: $(CORE_OBJ)
 	$(AR) rcs $@ $(CORE_OBJ)
 
 clean:
+	$(RM) benchmark_latency t/00util/interop
 	$(RM) encode decode lib/*.o deps/obl/*.o *.o *.a *.gcda *.gcno *.gcov callgrind.* *.gperf *.prof *.heap perf.data perf.data.old benchmark benchmark_core $(TEST_UTILS) $(EXAMPLES)
 	find . -name '*.[a,o]' | xargs $(RM)
 
 indent:
-	clang-format -style=LLVM -i lib/*.c include/*.h examples/*.c t/00util/*.c benchmark.c benchmark_core.c
+	clang-format -style=LLVM -i lib/*.c include/*.h examples/*.c t/00util/*.c benchmark.c benchmark_core.c benchmark_latency.c
 
 scan:
 	scan-build --status-bugs $(MAKE) clean benchmark
@@ -173,3 +178,10 @@ valgrind: clean $(TEST_UTILS) $(EXAMPLES)
 
 check-interop:
 	./t/interop_harness.sh
+
+.PHONY: check-interop check-interop-quick bench-latency
+check-interop-quick:
+	./t/interop_harness.sh --quick
+
+bench-latency: benchmark_latency
+	./benchmark_latency

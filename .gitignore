@@ -11,6 +11,8 @@ encode
 decode
 benchmark
 benchmark_core
+benchmark_latency
+t/00util/interop
 t/00util/matgen
 t/00util/repgen
 t/00util/hdpcgen
@@ -22,8 +24,9 @@ t/00util/bounds
 examples/carousel
 .DS_Store
 t/interop_test_dir
-tsnc/examples/blockchain_gossip
-tsnc/examples/tsnc_multipath
-tsnc/examples/tsnc_sync
+examples/blockchain_gossip
+examples/tsnc_multipath
+examples/tsnc_sync
+t/00util/api_regress
 t/00util/test_oblas_swap
 t/00util/test_oblas_kernels
