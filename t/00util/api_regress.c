@@ -434,8 +434,128 @@ static bool mmap_tracks_logical_size(void) {
 
   io = ioctx_mmap_file(path, IOCTX_MODE_READ);
   CHECK(io && io->size(io) == 101, "mmap output truncates to logical size");
+  CHECK(!io->seek(io, 102), "mmap read seek past EOF must fail");
   io->destroy(io);
   unlink(path);
+  return true;
+}
+
+static bool tsnc_relay_large_k(void) {
+  enum { K = 260, T = 16 };
+  uint8_t *src = calloc(K, T), *dec_buf = calloc(K, T);
+  uint8_t coef[K], pkt[T];
+  CHECK(src && dec_buf, "tsnc large-k alloc");
+  for (size_t i = 0; i < (size_t)K * T; i++)
+    src[i] = (uint8_t)(i * 31U + 5U);
+  struct ioctx *sio = ioctx_from_mem_ro(src, (size_t)K * T);
+  struct ioctx *dio = ioctx_from_mem(dec_buf, (size_t)K * T);
+  nanorq *enc = nanorq_encoder_new_ex((size_t)K * T, T, K, 1, 1);
+  CHECK(sio && dio && enc, "tsnc large-k setup");
+  uint64_t common = nanorq_oti_common(enc);
+  uint32_t scheme = nanorq_oti_scheme_specific(enc);
+
+  nanorq *relay = nanorq_decoder_new(common, scheme);
+  nanorq *dec = nanorq_decoder_new(common, scheme);
+  CHECK(relay && dec, "tsnc large-k nodes");
+  for (uint32_t i = 0; i < K; i++) {
+    memset(coef, 0, K);
+    coef[i] = 1;
+    CHECK(nanorq_decoder_add_recoded_symbol(relay, src + i * T,
+                                            nanorq_tag(0, i), coef,
+                                            NULL) == NANORQ_SYM_ADDED,
+          "relay add basis packet");
+  }
+  for (uint32_t esi = 0; esi < K + 20; esi++) {
+    CHECK(nanorq_generate_recoded_symbol(relay, NULL, 0, esi, coef, pkt),
+          "relay generate k>256 recode");
+    CHECK(nanorq_decoder_add_recoded_symbol(dec, pkt, nanorq_tag(0, 1000 + esi),
+                                            coef, dio) == NANORQ_SYM_ADDED,
+          "dest add k>256 recode");
+  }
+  CHECK(nanorq_repair_block(dec, dio, 0), "tsnc k>256 relay repair");
+  CHECK(memcmp(src, dec_buf, (size_t)K * T) == 0, "tsnc k>256 payload match");
+
+  nanorq_free(dec);
+  nanorq_free(relay);
+  nanorq_free(enc);
+  sio->destroy(sio);
+  dio->destroy(dio);
+  free(dec_buf);
+  free(src);
+  return true;
+}
+
+static bool high_overhead_burst_repair(void) {
+  enum { K = 10, T = 32, OH = 250 };
+  uint8_t src[K * T], dec_buf[K * T], pkt[T];
+  for (size_t i = 0; i < sizeof(src); i++)
+    src[i] = (uint8_t)(i * 13U + 7U);
+  memset(dec_buf, 0, sizeof(dec_buf));
+  struct ioctx *sio = ioctx_from_mem_ro(src, sizeof(src));
+  struct ioctx *dio = ioctx_from_mem(dec_buf, sizeof(dec_buf));
+  nanorq *enc = nanorq_encoder_new_ex(sizeof(src), T, K, 1, 1);
+  CHECK(sio && dio && enc, "burst overhead setup");
+  nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
+                                   nanorq_oti_scheme_specific(enc));
+  CHECK(dec, "burst overhead decoder");
+  for (uint32_t esi = 1; esi < K; esi++)
+    CHECK(nanorq_decoder_add_symbol(dec, src + esi * T, nanorq_tag(0, esi),
+                                    dio) == NANORQ_SYM_ADDED,
+          "burst add systematic");
+  for (uint32_t esi = K; esi <= K + OH; esi++) {
+    CHECK(nanorq_encode(enc, pkt, esi, 0, sio) == T, "burst encode repair");
+    CHECK(nanorq_decoder_add_symbol(dec, pkt, nanorq_tag(0, esi), dio) ==
+              NANORQ_SYM_ADDED,
+          "burst add repair");
+  }
+  CHECK(nanorq_repair_block(dec, dio, 0), "burst repair with large overhead");
+  CHECK(memcmp(src, dec_buf, sizeof(src)) == 0, "burst repair payload match");
+  nanorq_free(dec);
+  nanorq_free(enc);
+  sio->destroy(sio);
+  dio->destroy(dio);
+  return true;
+}
+
+static bool precalc_covers_unequal_blocks(void) {
+  enum { T = 16, BYTES = 11 * T };
+  uint8_t source[BYTES], decoded[BYTES] = {0}, packet[T];
+  for (size_t i = 0; i < sizeof(source); i++)
+    source[i] = (uint8_t)(i * 23U + 9U);
+  struct ioctx *src_io = ioctx_from_mem_ro(source, sizeof(source));
+  struct ioctx *dec_io = ioctx_from_mem(decoded, sizeof(decoded));
+  nanorq *enc = nanorq_encoder_new_ex(sizeof(source), T, 6, 2, 1);
+  CHECK(src_io && dec_io && enc && nanorq_blocks(enc) == 2,
+        "precalc unequal setup");
+  CHECK(nanorq_precalculate(enc), "precalc both KL and KS");
+  CHECK(enc->precalc[0].core && enc->precalc[0].K == 6 &&
+            enc->precalc[1].core && enc->precalc[1].K == 5,
+        "both partition block sizes must be precalculated");
+  nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
+                                   nanorq_oti_scheme_specific(enc));
+  CHECK(dec, "precalc unequal decoder");
+  for (unsigned sbn = 0; sbn < 2; sbn++) {
+    unsigned K = nanorq_block_symbols(enc, sbn);
+    CHECK(nanorq_generate_symbols(enc, sbn, src_io), "generate via precalc");
+    /* block scratch must remain unallocated when precalc cache hits */
+    CHECK(enc->encoders[sbn]->prep_mem == NULL &&
+              enc->encoders[sbn]->work_mem == NULL,
+          "KS block must hit precalc cache without uncached GE");
+    for (unsigned esi = 1; esi <= K; esi++) {
+      CHECK(nanorq_encode(enc, packet, esi, sbn, src_io) == T,
+            "encode unequal precalc");
+      CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(sbn, esi),
+                                      dec_io) == NANORQ_SYM_ADDED,
+            "add unequal precalc");
+    }
+    CHECK(nanorq_repair_block(dec, dec_io, sbn), "repair unequal precalc");
+  }
+  CHECK(memcmp(source, decoded, sizeof(source)) == 0,
+        "unequal precalc roundtrip");
+  nanorq_free(dec);
+  nanorq_free(enc);
+  dec_io->destroy(dec_io);
+  src_io->destroy(src_io);
   return true;
 }
 
@@ -454,6 +574,9 @@ int main(void) {
   CHECK(scratch_allocation_failures_can_retry(),
         "scratch allocation retry regression");
   CHECK(mmap_tracks_logical_size(), "mmap logical size regression");
+  CHECK(tsnc_relay_large_k(), "tsnc large-k relay regression");
+  CHECK(high_overhead_burst_repair(), "high-overhead burst repair regression");
+  CHECK(precalc_covers_unequal_blocks(), "unequal-block precalc regression");
   puts("all API regressions passed");
   return EXIT_SUCCESS;
 }

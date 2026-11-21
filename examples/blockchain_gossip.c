@@ -105,7 +105,7 @@ int main() {
             nanorq_generate_recoded_symbol(sender->decoder, sender->dec_io, 0,
                                            tag_idx, coef_buf, payload_buf);
           } else {
-            nanorq_generate_recoded_symbol(sender->decoder, NULL, 0, 0,
+            nanorq_generate_recoded_symbol(sender->decoder, NULL, 0, tag_idx,
                                            coef_buf, payload_buf);
           }
           node_receive(receiver, coef_buf, payload_buf, recoded_tag);
