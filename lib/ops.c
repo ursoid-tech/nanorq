@@ -9,9 +9,9 @@ static void ops_apply_schedule(uint8_t *D, uint32_t stride, schedule *S) {
   for (u32 idx = 0; idx < S->cp[1]; idx++) {
     sched_op op = ops[idx];
     if (op.u)
-      axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+      axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u, stride);
     else
-      scal(D + op.i * stride, op.j, stride);
+      scal(D + (size_t)op.i * stride, op.j, stride);
   }
 
   /* undo phase 1 row additions */
@@ -19,9 +19,10 @@ static void ops_apply_schedule(uint8_t *D, uint32_t stride, schedule *S) {
     for (u32 idx = S->cp[0] - 1; idx < S->cp[0]; idx--) {
       sched_op op = ops[idx];
       if (op.u)
-        axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+        axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u,
+             stride);
       else
-        scal(D + op.i * stride, op.j, stride);
+        scal(D + (size_t)op.i * stride, op.j, stride);
     }
   }
 
@@ -29,18 +30,18 @@ static void ops_apply_schedule(uint8_t *D, uint32_t stride, schedule *S) {
   for (u32 idx = S->cp[1]; idx < S->ops.n; idx++) {
     sched_op op = ops[idx];
     if (op.u)
-      axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+      axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u, stride);
     else
-      scal(D + op.i * stride, op.j, stride);
+      scal(D + (size_t)op.i * stride, op.j, stride);
   }
 
   /* reapply phase 1 row additions */
   for (u32 idx = 0; idx < S->cp[0]; idx++) {
     sched_op op = ops[idx];
     if (op.u)
-      axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+      axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u, stride);
     else
-      scal(D + op.i * stride, op.j, stride);
+      scal(D + (size_t)op.i * stride, op.j, stride);
   }
 }
 
@@ -50,7 +51,7 @@ static void ops_permute(uint8_t *D, uint32_t stride, u32 P[], u32 n) {
     u32 at = i;
     while (!(P[at] & 0x80000000)) {
       u32 next = P[at];
-      swap((D + i * stride), (D + next * stride), stride);
+      swap((D + (size_t)i * stride), (D + (size_t)next * stride), stride);
       P[at] |= 0x80000000;
       at = next;
     }
@@ -103,7 +104,7 @@ void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
     ptr[i] = 0;
   for (u32 it = 0; it < num; it++) {
     u32 row = mix[it];
-    nanorq_oblas.axpy(ptr, (D + row * stride), 1, stride);
+    nanorq_oblas.axpy(ptr, (D + (size_t)row * stride), 1, stride);
   }
 }
 

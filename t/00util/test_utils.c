@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
 #include "nanorq_core.h"
 #include "nanorq_ops.h"
 #include "partition.h"
@@ -6,6 +9,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#endif
 
 void test_partition() {
   printf("Testing partition...\n");
@@ -150,12 +159,149 @@ static void test_no_preconditioned_rows(void) {
   free(prep);
 }
 
+#if SIZE_MAX > UINT32_MAX && defined(MAP_ANONYMOUS) && defined(PROT_NONE)
+/* trace operations without touching GiB-sized rows */
+static uint8_t *offset_matrix;
+static size_t offset_call;
+static const unsigned offset_stride = 1U << 30;
+static const struct {
+  char kind;
+  unsigned i, j, u;
+} offset_calls[] = {
+    {'a', 4, 5, 1},                 /* forward */
+    {'s', 5, 0, 2}, {'s', 5, 0, 2}, /* undo */
+    {'a', 4, 5, 1}, {'a', 5, 4, 3}, /* backsolve */
+    {'s', 4, 0, 7}, {'a', 4, 5, 1}, /* reapply */
+    {'s', 5, 0, 2}, {'w', 0, 0, 0}, /* rows */
+    {'w', 1, 1, 0}, {'w', 2, 2, 0}, {'w', 3, 3, 0}, {'w', 4, 5, 0},
+    {'w', 4, 4, 0}, {'w', 0, 4, 0}, /* cols */
+    {'w', 0, 0, 0}, {'w', 1, 1, 0}, {'w', 2, 2, 0}, {'w', 3, 3, 0},
+};
+
+static void check_offset_call(char kind, uint8_t *dst, uint8_t *src, unsigned u,
+                              unsigned len) {
+  assert(offset_call < sizeof(offset_calls) / sizeof(*offset_calls));
+  assert(kind == offset_calls[offset_call].kind);
+  assert((kind == 's') == (src == NULL));
+  assert(u == offset_calls[offset_call].u && len == offset_stride);
+  assert(dst == offset_matrix + (size_t)offset_calls[offset_call].i * len);
+  if (src)
+    assert(src == offset_matrix + (size_t)offset_calls[offset_call].j * len);
+  offset_call++;
+}
+
+static void check_offset_axpy(uint8_t *dst, uint8_t *src, uint8_t u,
+                              unsigned len) {
+  check_offset_call('a', dst, src, u, len);
+}
+
+static void check_offset_scal(uint8_t *dst, uint8_t u, unsigned len) {
+  check_offset_call('s', dst, NULL, u, len);
+}
+
+static void check_offset_swap(uint8_t *dst, uint8_t *src, unsigned len) {
+  check_offset_call('w', dst, src, 0, len);
+}
+#endif
+
+static void test_large_matrix_offsets(void) {
+#if SIZE_MAX > UINT32_MAX && defined(MAP_ANONYMOUS) && defined(PROT_NONE)
+  enum { STRIDE = 131072 };
+  nanorq_core rq = {0};
+  bool ok = nanorq_core_encoder_new(50000, 0, &rq);
+  assert(ok);
+  (void)ok;
+  size_t bytes = (size_t)nanorq_core_get_pc_rows(&rq) * STRIDE;
+  /* reserve address space; only mixed rows are mapped read-write */
+  uint8_t *D = mmap(NULL, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (D == MAP_FAILED) {
+    puts("SKIP: large matrix offsets (virtual memory reservation unavailable)");
+    return;
+  }
+  uint32_t mix[GENC_MAX];
+  uint32_t num = nanorq_core_get_packet_mix(&rq, 0, mix, GENC_MAX);
+  uint8_t expected = 0;
+  uint8_t expected_tail = 0;
+  uint8_t high_expected = 0;
+  for (uint32_t i = 0; i < num; i++) {
+    size_t offset = (size_t)mix[i] * STRIDE;
+    if (mprotect(D + offset, STRIDE, PROT_READ | PROT_WRITE) != 0) {
+      int unmapped = munmap(D, bytes);
+      assert(unmapped == 0);
+      (void)unmapped;
+      puts("SKIP: large matrix offsets (mprotect unavailable)");
+      return;
+    }
+    uint8_t val = (uint8_t)(((mix[i] * 2654435761U) >> 24) | 1U);
+    if (offset > UINT32_MAX) {
+      if ((high_expected ^ val) == 0)
+        val ^= 2U;
+      high_expected ^= val;
+    }
+    uint8_t tail = (uint8_t)(i + 1);
+    D[offset] = val;
+    D[offset + STRIDE - 1] = tail;
+    expected ^= val;
+    expected_tail ^= tail;
+  }
+  assert(high_expected != 0);
+  uint8_t *out = malloc(STRIDE);
+  assert(out);
+  memset(out, 0xa5, STRIDE);
+  ops_mix(&rq, D, STRIDE, 0, out);
+  assert(out[0] == expected);
+  for (unsigned i = 1; i < STRIDE - 1; i++)
+    assert(out[i] == 0);
+  assert(out[STRIDE - 1] == expected_tail);
+  free(out);
+  (void)expected;
+  (void)expected_tail;
+  (void)high_expected;
+
+  /* six synthetic rows with 1 GiB stride cross the 32-bit offset boundary */
+  assert(bytes >= (size_t)6 * offset_stride);
+  uint32_t rows[] = {0, 1, 2, 3, 5, 4};
+  uint32_t cols[] = {4, 1, 2, 3, 0};
+  const uint32_t saved_rows[] = {0, 1, 2, 3, 5, 4};
+  const uint32_t saved_cols[] = {4, 1, 2, 3, 0};
+  nanorq_core scheduled = {.P.L = 5, .overhead = 1};
+  scheduled.W.di.a = rows;
+  scheduled.W.c.a = cols;
+  sched_op operations[] = {{1, 4, 5}, {0, 5, 2}, {3, 5, 4}, {0, 4, 7}};
+  schedule S = {
+      .cp = {2, 2},
+      .cpidx = 2,
+      .ops = {.a = operations, .n = 4, .m = 4},
+  };
+  struct oblas_impl saved = nanorq_oblas;
+  nanorq_oblas.axpy = check_offset_axpy;
+  nanorq_oblas.scal = check_offset_scal;
+  nanorq_oblas.swap = check_offset_swap;
+  offset_matrix = D;
+  offset_call = 0;
+  ops_run(&scheduled, D, offset_stride, &S);
+  nanorq_oblas = saved;
+  assert(offset_call == sizeof(offset_calls) / sizeof(*offset_calls));
+  assert(memcmp(rows, saved_rows, sizeof(rows)) == 0);
+  assert(memcmp(cols, saved_cols, sizeof(cols)) == 0);
+  (void)saved_rows;
+  (void)saved_cols;
+  int unmapped = munmap(D, bytes);
+  assert(unmapped == 0);
+  (void)unmapped;
+  puts("Large matrix offset tests passed.");
+#else
+  puts("SKIP: large matrix offsets require 64-bit size_t and anonymous mmap");
+#endif
+}
+
 int main() {
   test_partition();
   test_sopi();
   test_high_overhead_mem_reqs();
   test_prepared_workspace();
   test_no_preconditioned_rows();
+  test_large_matrix_offsets();
   printf("All utility tests passed successfully!\n");
   return 0;
 }
