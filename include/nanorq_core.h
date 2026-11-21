@@ -116,7 +116,7 @@ static inline uint8_t *nanorq_core_get_symbol_ptr(nanorq_core *rq, uint8_t *D,
                                                   uint32_t stride,
                                                   uint32_t row) {
   uint32_t SH = nanorq_core_get_pc_genc_offset(rq);
-  return D + (SH + row) * stride;
+  return D + ((size_t)SH + row) * stride;
 }
 
 #endif

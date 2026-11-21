@@ -138,7 +138,8 @@ void nanorq_core_get_memory_reqs(uint32_t K, uint32_t overhead, uint32_t stride,
     return;
   *reqs = (struct nanorq_core_mem_reqs){0};
   nanorq_core rq = {0};
-  if (!nanorq_core_encoder_new(K, overhead, &rq) || stride == 0)
+  if (!nanorq_core_encoder_new(K, overhead, &rq) || stride == 0 ||
+      overhead > UINT32_MAX - K)
     return;
   reqs->prepare_bytes = nanorq_core_calculate_prepare_memory(&rq);
   reqs->work_bytes = nanorq_core_calculate_work_memory(&rq);
@@ -148,14 +149,15 @@ void nanorq_core_get_memory_reqs(uint32_t K, uint32_t overhead, uint32_t stride,
     return;
   }
   reqs->matrix_bytes = rows * stride;
-  reqs->schedule_bytes = ops_estimate_schedule_bytes(K);
+  reqs->schedule_bytes = ops_estimate_schedule_bytes(K + overhead);
 }
 
 #ifndef NANORQ_NO_LIBC
 
 bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
                                uint32_t num_repair, uint8_t *repair_out) {
-  if (!src_data || !repair_out || T == 0)
+  if (!src_data || !repair_out || T == 0 || num_repair > UINT32_MAX - K ||
+      (size_t)num_repair > SIZE_MAX / T)
     return false;
   nanorq_core rq = {0};
   if (!nanorq_core_encoder_new(K, 0, &rq))
@@ -183,7 +185,7 @@ bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
   uint32_t SH = nanorq_core_get_pc_genc_offset(&rq);
 
   for (uint32_t i = 0; i < K; i++) {
-    memcpy(D + (SH + i) * T, src_data + i * T, T);
+    memcpy(D + ((size_t)SH + i) * T, src_data + (size_t)i * T, T);
   }
 
   uint8_t *work_mem = (uint8_t *)malloc(reqs.work_bytes);
@@ -211,7 +213,7 @@ bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
   ops_run(&rq, D, T, &S_enc);
 
   for (uint32_t i = 0; i < num_repair; i++) {
-    ops_mix(&rq, D, T, K + i, repair_out + i * T);
+    ops_mix(&rq, D, T, K + i, repair_out + (size_t)i * T);
   }
 
   free(prep_mem);

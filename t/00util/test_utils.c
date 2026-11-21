@@ -1,4 +1,5 @@
 #include "nanorq_core.h"
+#include "nanorq_ops.h"
 #include "partition.h"
 #include "sopi.h"
 #include <assert.h>
@@ -27,30 +28,68 @@ void test_sopi() {
   printf("Testing SOPI...\n");
   rq_sopi sopi = {100, 50, 200, 10};
 
-  // Single ESI mapping test
+  /* single ESI mapping test */
   uint32_t esi = sopi_get_esi_single(&sopi, 5);
   uint64_t expected_esi = (100ULL + 5ULL * 50ULL) % SOPI_N;
   assert(esi == expected_esi);
 
-  // Large index that overflows 32-bit but stays within limits
+  /* large index that stays within 64-bit product */
   uint64_t large_i = 100000000ULL;
   uint64_t large_b = 300ULL;
   uint32_t val = sopi_mersenne_mod(sopi.a, large_i, large_b);
   uint64_t expected_val = (sopi.a + large_i * large_b) % SOPI_N;
   assert(val == expected_val);
 
-  // Multi block mapping test
+  /* 64-bit i * B overflow and unreduced 32-bit inputs */
+  uint64_t huge_i = (1ULL << 50) + 1234567ULL;
+  uint64_t huge_b = 0xFFFFFFFFULL;
+  uint64_t huge_a = 0xFFFFFFFFULL;
+  uint32_t huge_val = sopi_mersenne_mod(huge_a, huge_i, huge_b);
+  uint64_t exp_huge =
+      ((huge_a % SOPI_N) + ((huge_i % SOPI_N) * (huge_b % SOPI_N)) % SOPI_N) %
+      SOPI_N;
+  assert(huge_val == exp_huge);
+  assert(sopi_mersenne_mod(UINT64_MAX, UINT64_MAX, UINT64_MAX) < SOPI_N);
+
+  /* multi block mapping test */
   uint32_t Z = 5;
   uint32_t out_sbn, out_esi;
   sopi_get_mapping_multi(&sopi, 12, Z, &out_sbn, &out_esi);
 
   uint64_t r = 12 / Z;
   uint64_t expected_multi_esi = (sopi.a + r * sopi.b) % SOPI_N;
-  uint32_t expected_multi_sbn = (12 + sopi.c + r * sopi.d) % Z;
+  uint32_t expected_multi_sbn = (12 + sopi.c + r * (uint64_t)sopi.d) % Z;
   assert(out_esi == expected_multi_esi);
   assert(out_sbn == expected_multi_sbn);
 
+  /* huge index multi-block sbn wrap check */
+  rq_sopi big_sopi = {17, 0x7FFFFFF0U, 0xFFFFFFFAU, 0xFFFFFFFBU};
+  sopi_get_mapping_multi(&big_sopi, UINT64_MAX - 3ULL, 7, &out_sbn, &out_esi);
+  assert(out_sbn < 7 && out_esi < SOPI_N);
+
   printf("SOPI tests passed.\n");
+}
+
+static void test_high_overhead_mem_reqs(void) {
+  enum { K = 10, OH = 200, STRIDE = 64 };
+  struct nanorq_core_mem_reqs reqs = {0};
+  nanorq_core_get_memory_reqs(K, OH, STRIDE, &reqs);
+  assert(reqs.schedule_bytes >= ops_estimate_schedule_bytes(K + OH));
+  nanorq_core rq = {0};
+  assert(nanorq_core_encoder_new(K, OH, &rq));
+  uint8_t *prep = malloc(reqs.prepare_bytes);
+  uint8_t *work = malloc(reqs.work_bytes);
+  void *sched_buf = malloc(reqs.schedule_bytes);
+  schedule S = {0};
+  assert(prep && work && sched_buf);
+  assert(nanorq_core_prepare(&rq, prep, reqs.prepare_bytes));
+  assert(schedule_init(&S, sched_buf, reqs.schedule_bytes));
+  nanorq_core_set_op_callback(&rq, &S, ops_push);
+  assert(nanorq_core_precalculate(&rq, work, reqs.work_bytes));
+  assert(!S.overflowed && S.cpidx == 2);
+  free(sched_buf);
+  free(work);
+  free(prep);
 }
 
 void test_prepared_workspace() {
@@ -114,6 +153,7 @@ static void test_no_preconditioned_rows(void) {
 int main() {
   test_partition();
   test_sopi();
+  test_high_overhead_mem_reqs();
   test_prepared_workspace();
   test_no_preconditioned_rows();
   printf("All utility tests passed successfully!\n");
