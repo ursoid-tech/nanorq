@@ -9,9 +9,9 @@ static void ops_apply_schedule(uint8_t *D, uint32_t stride, schedule *S) {
   for (u32 idx = 0; idx < S->cp[1]; idx++) {
     sched_op op = ops[idx];
     if (op.u)
-      axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+      axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u, stride);
     else
-      scal(D + op.i * stride, op.j, stride);
+      scal(D + (size_t)op.i * stride, op.j, stride);
   }
 
   /* undo phase 1 row additions */
@@ -19,9 +19,10 @@ static void ops_apply_schedule(uint8_t *D, uint32_t stride, schedule *S) {
     for (u32 idx = S->cp[0] - 1; idx < S->cp[0]; idx--) {
       sched_op op = ops[idx];
       if (op.u)
-        axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+        axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u,
+             stride);
       else
-        scal(D + op.i * stride, op.j, stride);
+        scal(D + (size_t)op.i * stride, op.j, stride);
     }
   }
 
@@ -29,18 +30,18 @@ static void ops_apply_schedule(uint8_t *D, uint32_t stride, schedule *S) {
   for (u32 idx = S->cp[1]; idx < S->ops.n; idx++) {
     sched_op op = ops[idx];
     if (op.u)
-      axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+      axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u, stride);
     else
-      scal(D + op.i * stride, op.j, stride);
+      scal(D + (size_t)op.i * stride, op.j, stride);
   }
 
   /* reapply phase 1 row additions */
   for (u32 idx = 0; idx < S->cp[0]; idx++) {
     sched_op op = ops[idx];
     if (op.u)
-      axpy(D + op.i * stride, D + op.j * stride, op.u, stride);
+      axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u, stride);
     else
-      scal(D + op.i * stride, op.j, stride);
+      scal(D + (size_t)op.i * stride, op.j, stride);
   }
 }
 
@@ -50,7 +51,7 @@ static void ops_permute(uint8_t *D, uint32_t stride, u32 P[], u32 n) {
     u32 at = i;
     while (!(P[at] & 0x80000000)) {
       u32 next = P[at];
-      swap((D + i * stride), (D + next * stride), stride);
+      swap((D + (size_t)i * stride), (D + (size_t)next * stride), stride);
       P[at] |= 0x80000000;
       at = next;
     }
@@ -143,7 +144,8 @@ void nanorq_core_get_memory_reqs(uint32_t K, uint32_t overhead, uint32_t stride,
     return;
   *reqs = (struct nanorq_core_mem_reqs){0};
   nanorq_core rq = {0};
-  if (!nanorq_core_encoder_new(K, overhead, &rq) || stride == 0)
+  if (!nanorq_core_encoder_new(K, overhead, &rq) || stride == 0 ||
+      overhead > UINT32_MAX - K)
     return;
   reqs->prepare_bytes = nanorq_core_calculate_prepare_memory(&rq);
   reqs->work_bytes = nanorq_core_calculate_work_memory(&rq);
@@ -153,17 +155,20 @@ void nanorq_core_get_memory_reqs(uint32_t K, uint32_t overhead, uint32_t stride,
     return;
   }
   reqs->matrix_bytes = rows * stride;
-  reqs->schedule_bytes = ops_estimate_schedule_bytes(K);
+  reqs->schedule_bytes = ops_estimate_schedule_bytes(K + overhead);
 }
 
 #ifndef NANORQ_NO_LIBC
 
 bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
                                uint32_t num_repair, uint8_t *repair_out) {
-  if (!src_data || !repair_out || T == 0)
+  if (!src_data || !repair_out || T == 0 || (size_t)num_repair > SIZE_MAX / T)
     return false;
   nanorq_core rq = {0};
   if (!nanorq_core_encoder_new(K, 0, &rq))
+    return false;
+  /* Repair ESIs map to internal symbol IDs starting at Kprime. */
+  if (num_repair > UINT32_MAX - rq.P.Kprime + 1)
     return false;
 
   struct nanorq_core_mem_reqs reqs;
@@ -188,7 +193,7 @@ bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
   uint32_t SH = nanorq_core_get_pc_genc_offset(&rq);
 
   for (uint32_t i = 0; i < K; i++) {
-    memcpy(D + (SH + i) * T, src_data + i * T, T);
+    memcpy(D + ((size_t)SH + i) * T, src_data + (size_t)i * T, T);
   }
 
   uint8_t *work_mem = (uint8_t *)malloc(reqs.work_bytes);
@@ -216,7 +221,7 @@ bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
   ops_run(&rq, D, T, &S_enc);
 
   for (uint32_t i = 0; i < num_repair; i++) {
-    ops_mix(&rq, D, T, K + i, repair_out + i * T);
+    ops_mix(&rq, D, T, K + i, repair_out + (size_t)i * T);
   }
 
   free(prep_mem);

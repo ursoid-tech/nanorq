@@ -10,6 +10,20 @@ nanorq is a compact, performant implementation of the raptorq fountain code capa
 ## Performance[^2]
 ![](graph.png)
 
+`make bench-latency` reports p50, p95, and p99 encode, decode, and total host
+latency for blocks of 1 to 64 source symbols. Each iteration drops one source
+symbol, sends four repairs, and verifies the recovered bytes. The CSV includes
+both freshly allocated and reused codec objects. To change the sample count,
+build with `make benchmark_latency` and run, for example, `./benchmark_latency 100`.
+
+## Tests
+
+Run `make check` for the native suite. With Python 3 and Cargo available,
+`make check-interop` tests encoding and decoding against the Rust `raptorq`
+crate in both directions. Use `make check-interop-quick` for the smaller corpus.
+To replay a retained fixture, pass its case directory to
+`./t/interop_harness.sh --replay CASE_DIRECTORY`.
+
 ## Use cases
   - firmware deployment / software updates
   - video streaming

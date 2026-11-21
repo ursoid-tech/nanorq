@@ -11,5 +11,9 @@ path = "src/main.rs"
 name = "bench"
 path = "src/bench.rs"
 
+[[bin]]
+name = "fixture"
+path = "src/fixture.rs"
+
 [dependencies]
 raptorq = "2.0.1"

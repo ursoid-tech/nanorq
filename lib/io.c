@@ -74,7 +74,7 @@ struct ioctx *ioctx_from_file(const char *fn, int mode) {
   if (mode == IOCTX_MODE_READ) {
     fp = fopen(fn, "rb");
   } else {
-    fp = fopen(fn, "w+b"); // create decoder
+    fp = fopen(fn, "w+b"); /* create output file */
   }
 
   if (!fp)
@@ -241,12 +241,18 @@ static uint8_t *mmapio_mmap(size_t mapsize, bool writable, int fd,
 static bool mmapio_seek(struct ioctx *io, const size_t offset) {
   struct mmapioctx *_io = (struct mmapioctx *)io;
 
-  if (!_io->io.writable && offset == _io->filesize) {
-    _io->pos = offset;
-    return true;
-  }
-
-  if (offset >= _io->offset && offset - _io->offset < _io->mapsize) {
+  if (!_io->io.writable) {
+    if (offset > _io->filesize)
+      return false;
+    if (offset == _io->filesize) {
+      _io->pos = offset;
+      return true;
+    }
+    if (offset >= _io->offset && offset - _io->offset < _io->lastmap) {
+      _io->pos = offset;
+      return true;
+    }
+  } else if (offset >= _io->offset && offset - _io->offset < _io->mapsize) {
     _io->pos = offset;
     return true;
   }
@@ -314,24 +320,19 @@ static size_t mmapio_read(struct ioctx *io, uint8_t *buf, size_t len) {
     return 0;
 
   while (read_bytes < len) {
-    if (_io->pos >= _io->filesize)
+    if (_io->pos >= _io->filesize || !mmapio_seek(io, _io->pos))
       break;
 
-    size_t at = _io->pos % _io->mapsize;
+    size_t at = _io->pos - _io->offset;
     size_t avail = _io->lastmap - at;
+    if (avail > _io->filesize - _io->pos)
+      avail = _io->filesize - _io->pos;
 
     size_t to_read = (len - read_bytes < avail) ? (len - read_bytes) : avail;
 
-    if (to_read > 0) {
-      memcpy(buf + read_bytes, _io->ptr + at, to_read);
-      read_bytes += to_read;
-      _io->pos += to_read;
-    }
-
-    if (read_bytes < len && _io->pos < _io->filesize) {
-      if (!mmapio_seek(io, _io->offset + _io->mapsize))
-        break;
-    }
+    memcpy(buf + read_bytes, _io->ptr + at, to_read);
+    read_bytes += to_read;
+    _io->pos += to_read;
   }
   return read_bytes;
 }
@@ -344,24 +345,18 @@ static size_t mmapio_write(struct ioctx *io, const uint8_t *buf, size_t len) {
     return 0;
 
   while (written < len) {
-    size_t at = _io->pos % _io->mapsize;
+    if (!mmapio_seek(io, _io->pos))
+      break;
+    size_t at = _io->pos - _io->offset;
     size_t avail = _io->mapsize - at;
 
     size_t to_write = (len - written < avail) ? (len - written) : avail;
 
-    if (to_write > 0) {
-      memcpy(_io->ptr + at, buf + written, to_write);
-      written += to_write;
-      _io->pos += to_write;
-      if (_io->pos > _io->filesize) {
-        _io->filesize = _io->pos;
-      }
-    }
-
-    if (written < len) {
-      if (!mmapio_seek(io, _io->offset + _io->mapsize))
-        break;
-    }
+    memcpy(_io->ptr + at, buf + written, to_write);
+    written += to_write;
+    _io->pos += to_write;
+    if (_io->pos > _io->filesize)
+      _io->filesize = _io->pos;
   }
 
   return written;
@@ -402,14 +397,15 @@ struct ioctx *ioctx_mmap_file(const char *fn, int mode) {
   if (page_size_result <= 0)
     return NULL;
   size_t pagesize = (size_t)page_size_result;
-  size_t mapsize = (65536 / pagesize) * pagesize;
+  size_t target_win = sizeof(size_t) >= 8 ? (16U << 20) : (1U << 20);
+  size_t mapsize = (target_win / pagesize) * pagesize;
   if (mapsize == 0)
-    mapsize = pagesize; // safe fallback
+    mapsize = pagesize; /* safe fallback */
 
   if (mode == IOCTX_MODE_READ) {
     fd = open(fn, O_RDONLY);
   } else {
-    fd = open(fn, O_RDWR | O_CREAT | O_TRUNC, 0666); // create decoder
+    fd = open(fn, O_RDWR | O_CREAT | O_TRUNC, 0666); /* create output file */
   }
 
   if (fd == -1) {

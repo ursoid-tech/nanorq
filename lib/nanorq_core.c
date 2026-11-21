@@ -92,7 +92,7 @@ void nanorq_core_place_symbol(nanorq_core *rq, uint8_t *D, uint32_t stride,
   uint32_t SH = nanorq_core_get_pc_genc_offset(rq);
   if (esi > UINT32_MAX - SH || SH + esi >= nanorq_core_get_pc_rows(rq))
     return;
-  uint8_t *dst = D + (SH + esi) * stride;
+  uint8_t *dst = D + ((size_t)SH + esi) * stride;
   memcpy(dst, src, T);
 }
 size_t nanorq_core_calculate_prepare_memory(nanorq_core *rq) {
