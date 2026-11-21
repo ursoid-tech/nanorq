@@ -117,12 +117,13 @@ uint32_t nanorq_core_recommended_stride(uint32_t T) {
   if (align == 0 || T > UINT32_MAX - (align - 1))
     return 0;
   uint32_t padded = ALIGN_VAL(T, align);
-  /* avoid cache-line aliasing: if padded is an exact multiple of 64, add one
-   * alignment unit */
-  if (padded % 64 == 0) {
-    if (padded > UINT32_MAX - align)
+  /* pad past 2 KiB multiples to avoid L1D cache-set aliasing while preserving
+   * 64-byte cache-line alignment */
+  if (padded >= 2048U && (padded & 2047U) == 0) {
+    uint32_t step = align >= 64U ? align : 64U;
+    if (padded > UINT32_MAX - step)
       return 0;
-    padded += align;
+    padded += step;
   }
   return padded;
 }
