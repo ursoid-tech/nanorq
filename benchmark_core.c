@@ -97,7 +97,7 @@ int main(int argc, char *argv[]) {
     uint64_t t_mid1 = usecs();
     t0 += (t_mid1 - t_mid0);
 
-    ops_run(&rq, D, stride, &S_enc);
+    ops_run_pivoted(D, stride, &S_enc);
     bytes += T * K;
   }
   double elapsed_encode = (usecs() - t0) / 1000000.0;
@@ -123,7 +123,7 @@ int main(int argc, char *argv[]) {
     uint64_t t_mid1 = usecs();
     t0 += (t_mid1 - t_mid0);
 
-    ops_run(&rq, D, stride, &S_enc);
+    ops_run_pivoted(D, stride, &S_enc);
     bytes += T * K;
   }
   double elapsed_precalc = (usecs() - t0) / 1000000.0;
@@ -131,7 +131,7 @@ int main(int argc, char *argv[]) {
   /* decode with no extra overhead */
   /* encode to compute intermediate symbols */
   memcpy(D, D_backup, mem);
-  ops_run(&rq, D, stride, &S_enc);
+  ops_run_pivoted(D, stride, &S_enc);
 
   int drops = (int)(K * expected_loss / 100.0);
   if (drops <= 0)
@@ -144,7 +144,7 @@ int main(int argc, char *argv[]) {
 
   uint8_t *repair_pkts = (uint8_t *)malloc(drops * stride);
   for (u32 rp = 0; rp < (u32)drops; rp++) {
-    ops_mix(&rq, D, stride, K + rp, repair_pkts + rp * stride);
+    ops_mix_pivoted(&rq, D, stride, K + rp, repair_pkts + rp * stride);
   }
 
   uint8_t *orig_pkts = (uint8_t *)malloc(drops * stride);
@@ -208,12 +208,13 @@ int main(int argc, char *argv[]) {
     t0 += (t_mid1 - t_mid0);
 
     t_start = usecs();
-    ops_run(&dec, D_dec, stride, &S_dec);
+    ops_run_pivoted(D_dec, stride, &S_dec);
     t_ops_run_dec += (usecs() - t_start) / 1000000.0;
 
     t_start = usecs();
     for (u32 rp = 0; rp < (u32)drops; rp++) {
-      ops_mix(&dec, D_dec, stride, dropped_esi[rp], decoded_pkts + rp * stride);
+      ops_mix_pivoted(&dec, D_dec, stride, dropped_esi[rp],
+                      decoded_pkts + rp * stride);
     }
     t_ops_mix_dec += (usecs() - t_start) / 1000000.0;
 
@@ -250,7 +251,7 @@ int main(int argc, char *argv[]) {
   free(repair_pkts);
   repair_pkts = (uint8_t *)malloc((drops + overhead) * stride);
   for (u32 rp = 0; rp < (u32)(drops + overhead); rp++) {
-    ops_mix(&rq, D, stride, K + rp, repair_pkts + rp * stride);
+    ops_mix_pivoted(&rq, D, stride, K + rp, repair_pkts + rp * stride);
   }
 
   nanorq_core dec_oh;
@@ -323,13 +324,13 @@ int main(int argc, char *argv[]) {
     t0 += (t_mid1 - t_mid0);
 
     t_start = usecs();
-    ops_run(&dec_oh, D_dec_oh, stride, &S_dec_oh);
+    ops_run_pivoted(D_dec_oh, stride, &S_dec_oh);
     t_ops_run += (usecs() - t_start) / 1000000.0;
 
     t_start = usecs();
     for (u32 rp = 0; rp < (u32)drops; rp++) {
-      ops_mix(&dec_oh, D_dec_oh, stride, dropped_esi[rp],
-              decoded_pkts + rp * stride);
+      ops_mix_pivoted(&dec_oh, D_dec_oh, stride, dropped_esi[rp],
+                      decoded_pkts + rp * stride);
     }
     t_ops_mix += (usecs() - t_start) / 1000000.0;
 

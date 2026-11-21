@@ -22,10 +22,10 @@ void ops_push(void *arg, u32 i, u32 j, u8 u) {
   }
 }
 
-void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S) {
-  if (!rq || !D || stride == 0 || !S || !S->ops.a || S->cpidx != 2 ||
+bool ops_run_pivoted(uint8_t *D, uint32_t stride, schedule *S) {
+  if (!D || stride == 0 || !S || !S->ops.a || S->cpidx != 2 ||
       S->overflowed || S->cp[0] > S->cp[1] || S->cp[1] > S->ops.n)
-    return;
+    return false;
   nanorq_core_init();
   void (*row_ops)(u8 *, unsigned, const struct oblas_row_op *, size_t, int) =
       nanorq_oblas.row_ops;
@@ -35,9 +35,36 @@ void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S) {
     row_ops(D, stride, S->ops.a, S->cp[0], 1);
   row_ops(D, stride, S->ops.a + S->cp[1], S->ops.n - S->cp[1], 0);
   row_ops(D, stride, S->ops.a, S->cp[0], 0);
+  return true;
 }
 
-void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
+/* Mark visited rows in the pivot vector while rotating each cycle. */
+static void permute_rows(u8 *D, u32 stride, u32 *perm, u32 count) {
+  const u32 visited = UINT32_C(1) << 31;
+  for (u32 i = 0; i < count; i++) {
+    u32 at = i;
+    while (!(perm[at] & visited)) {
+      u32 next = perm[at];
+      if (next != i)
+        nanorq_oblas.swap(D + (size_t)i * stride, D + (size_t)next * stride,
+                          stride);
+      perm[at] |= visited;
+      at = next;
+    }
+  }
+  for (u32 i = 0; i < count; i++)
+    perm[i] &= ~visited;
+}
+
+void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S) {
+  if (!rq || !rq->W.di.a || !rq->W.c.a || !ops_run_pivoted(D, stride, S))
+    return;
+  permute_rows(D, stride, rq->W.di.a, nanorq_core_get_pc_rows(rq));
+  permute_rows(D, stride, rq->W.c.a, nanorq_core_get_pc_cols(rq));
+}
+
+static void mix_rows(nanorq_core *rq, u8 *D, u32 stride, u32 esi, u8 *ptr,
+                     bool pivoted) {
   if (!rq || !D || stride == 0 || !ptr)
     return;
   uint32_t mix[GENC_MAX];
@@ -49,7 +76,7 @@ void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
   nanorq_core_init();
 
   /* resolve logical intermediate symbols through the inverting core */
-  if (rq->W.inverted) {
+  if (pivoted) {
     for (u32 it = 0; it < num; it++)
       mix[it] = uv_A(rq->W.d, uv_A(rq->W.ci, mix[it]));
   }
@@ -83,6 +110,16 @@ void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
   }
   for (; it < num; it++)
     nanorq_oblas.axpy(ptr, D + (size_t)mix[it] * stride, 1, stride);
+}
+
+void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
+  mix_rows(rq, D, stride, esi, ptr, false);
+}
+
+void ops_mix_pivoted(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi,
+                     u8 *ptr) {
+  if (rq && rq->W.d.a && rq->W.ci.a)
+    mix_rows(rq, D, stride, esi, ptr, true);
 }
 
 size_t ops_estimate_schedule_bytes(uint32_t K) {
@@ -181,7 +218,7 @@ bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
   nanorq_core_set_op_callback(&rq, &S_enc, ops_push);
 
   if (!nanorq_core_precalculate(&rq, work_mem, reqs.work_bytes) ||
-      S_enc.overflowed || S_enc.cpidx != 2) {
+      !ops_run_pivoted(D, T, &S_enc)) {
     free(prep_mem);
     free(D);
     free(work_mem);
@@ -189,10 +226,8 @@ bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
     return false;
   }
 
-  ops_run(&rq, D, T, &S_enc);
-
   for (uint32_t i = 0; i < num_repair; i++) {
-    ops_mix(&rq, D, T, K + i, repair_out + (size_t)i * T);
+    ops_mix_pivoted(&rq, D, T, K + i, repair_out + (size_t)i * T);
   }
 
   free(prep_mem);

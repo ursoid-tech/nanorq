@@ -116,7 +116,7 @@ static void compare_schedule(nanorq_core *rq, schedule *s, uint32_t stride) {
   fill_bytes(storage, bytes + 16);
   memcpy(reference, storage, bytes + 16);
   /* offset base to test unaligned SIMD rows and tails */
-  ops_run(rq, storage + 5, stride, s);
+  CHECK(ops_run_pivoted(storage + 5, stride, s), "replay in pivot order");
   reference_replay(reference + 5, stride, s);
   CHECK(memcmp(storage, reference, bytes + 16) == 0,
         "replay including guards matches independent GF256 arithmetic");
@@ -150,7 +150,7 @@ static void check_mixing(struct fixture *f, uint32_t stride) {
     for (uint32_t idx = 0; idx < count; idx++)
       for (uint32_t byte = 0; byte < stride; byte++)
         reference[3 + byte] ^= logical[(size_t)mix[idx] * stride + byte];
-    ops_mix(rq, d, stride, esi, output + 3);
+    ops_mix_pivoted(rq, d, stride, esi, output + 3);
     CHECK(memcmp(output, reference, stride + 16) == 0,
           "virtual row mixing and tails match materialized logical matrix");
     for (unsigned which = 0; which < 2; which++) {
@@ -160,7 +160,7 @@ static void check_mixing(struct fixture *f, uint32_t stride) {
           row = rq->W.d.a[pos];
       memcpy(aliased, d, bytes);
       size_t offset = (size_t)row * stride;
-      ops_mix(rq, aliased, stride, esi, aliased + offset);
+      ops_mix_pivoted(rq, aliased, stride, esi, aliased + offset);
       CHECK(memcmp(aliased + offset, reference + 3, stride) == 0,
             "mixing may overwrite the first or a later input row");
       CHECK(memcmp(aliased, d, offset) == 0 &&
@@ -173,6 +173,39 @@ static void check_mixing(struct fixture *f, uint32_t stride) {
   free(output);
   free(aliased);
   free(logical);
+  free(d);
+}
+
+/* The public replay matrix can outlive the schedule and prepare arena. */
+static void canonical_replay(void) {
+  enum { K = 23, STRIDE = 17 };
+  struct fixture f;
+  fixture_init(&f, K, 0);
+  size_t bytes = (size_t)nanorq_core_get_pc_rows(&f.rq) * STRIDE;
+  uint8_t *d = checked_malloc(bytes);
+  uint8_t src[K][STRIDE], output[STRIDE];
+  fill_bytes((uint8_t *)src, sizeof(src));
+  nanorq_core_init_matrix(&f.rq, d, STRIDE);
+  for (u32 esi = 0; esi < K; esi++)
+    nanorq_core_place_symbol(&f.rq, d, STRIDE, esi, src[esi], STRIDE);
+  ops_run(&f.rq, d, STRIDE, &f.schedule);
+  fixture_free(&f);
+
+  nanorq_core other;
+  CHECK(nanorq_core_encoder_new(K, 0, &other), "fresh mixing core");
+  for (u32 esi = 0; esi < K; esi++) {
+    u32 mix[GENC_MAX];
+    u32 count = nanorq_core_get_packet_mix(&other, esi, mix, GENC_MAX);
+    memset(output, 0, sizeof(output));
+    for (u32 i = 0; i < count; i++)
+      for (u32 j = 0; j < STRIDE; j++)
+        output[j] ^= d[(size_t)mix[i] * STRIDE + j];
+    CHECK(memcmp(output, src[esi], STRIDE) == 0, "canonical intermediate rows");
+    ops_mix(&f.rq, d, STRIDE, esi, output);
+    CHECK(memcmp(output, src[esi], STRIDE) == 0, "mix after prepare arena freed");
+    ops_mix(&other, d, STRIDE, esi, output);
+    CHECK(memcmp(output, src[esi], STRIDE) == 0, "mix with a fresh core");
+  }
   free(d);
 }
 
@@ -246,20 +279,19 @@ static void small_replay_and_mixing(void) {
 }
 
 static void reject_invalid_checkpoints(void) {
-  nanorq_core rq = {0};
-  CHECK(nanorq_core_encoder_new(10, 0, &rq), "checkpoint test core");
   sched_op operation = {1, 1, 0};
   schedule s = {.cp = {1, 0}, .cpidx = 2, .ops = {.a = &operation, .n = 1}};
   uint8_t d[2] = {7, 11};
-  ops_run(&rq, d, 1, &s);
+  CHECK(!ops_run_pivoted(d, 1, &s), "reject invalid schedule");
   CHECK(d[0] == 7 && d[1] == 11, "reject reversed checkpoints");
   s.cp[0] = 0;
   s.cp[1] = 2;
-  ops_run(&rq, d, 1, &s);
+  CHECK(!ops_run_pivoted(d, 1, &s), "reject invalid schedule");
   CHECK(d[0] == 7 && d[1] == 11, "reject checkpoint past schedule");
 }
 
 int main(void) {
+  canonical_replay();
   canonical_mixing_before_inversion();
   small_replay_and_mixing();
   reject_invalid_checkpoints();

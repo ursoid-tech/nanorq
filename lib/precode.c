@@ -381,7 +381,6 @@ bool precode_matrix_prepare(params *P, pc *W) {
 
 int precode_matrix_invert(params *P, pc *W) {
   assert((W->i + W->u) == P->L);
-  W->inverted = false;
 
   precode_matrix_make_U(P, W);
 
@@ -399,6 +398,5 @@ int precode_matrix_invert(params *P, pc *W) {
   }
   W->cb.on_op(W->cb.on_op_arg, 0, 0, 0);
   precode_matrix_backsolve(P, W);
-  W->inverted = true;
   return 1;
 }

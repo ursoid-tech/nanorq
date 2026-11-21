@@ -678,7 +678,8 @@ bool nanorq_generate_symbols(nanorq *rq, uint8_t sbn, struct ioctx *io) {
 
   struct precalc_entry *pc_ent = find_precalc_entry(rq, enc->K);
   if (pc_ent) {
-    ops_run(pc_ent->core, enc->D, enc->stride, pc_ent->S);
+    if (!ops_run_pivoted(enc->D, enc->stride, pc_ent->S))
+      return false;
     enc->inversion_core = pc_ent->core;
     enc->inverted = true;
     return true;
@@ -698,10 +699,9 @@ bool nanorq_generate_symbols(nanorq *rq, uint8_t sbn, struct ioctx *io) {
 
   nanorq_core_set_op_callback(&enc->core, &enc->S, ops_push);
   if (!nanorq_core_precalculate(&enc->core, enc->work_mem, enc->work_len) ||
-      enc->S.overflowed || enc->S.cpidx != 2)
+      !ops_run_pivoted(enc->D, enc->stride, &enc->S))
     return false;
 
-  ops_run(&enc->core, enc->D, enc->stride, &enc->S);
   enc->inversion_core = &enc->core;
   enc->inverted = true;
 
@@ -730,7 +730,7 @@ size_t nanorq_encode(nanorq *rq, void *data, uint32_t esi, uint8_t sbn,
     return 0;
   if (!ensure_mix_buf(enc))
     return 0;
-  ops_mix(enc->inversion_core, enc->D, enc->stride, esi, enc->mix_buf);
+  ops_mix_pivoted(enc->inversion_core, enc->D, enc->stride, esi, enc->mix_buf);
   memcpy(data, enc->mix_buf, rq->common.T);
   return rq->common.T;
 }
@@ -1145,7 +1145,7 @@ static bool write_recovered_block(nanorq *rq, struct block_encoder *dec,
   for (uint32_t gap = 0; gap < dec->K; gap++) {
     if (compat_bitmask_check(&dec->repair_mask, gap))
       continue;
-    ops_mix(dec->inversion_core, dec->D, dec->stride, gap, dec->mix_buf);
+    ops_mix_pivoted(dec->inversion_core, dec->D, dec->stride, gap, dec->mix_buf);
     if (transfer_esi(rq, sbn, gap, dec->K, dec->mix_buf, rq->common.T, io, 1) ==
         SIZE_MAX)
       return false;
@@ -1252,8 +1252,10 @@ static bool attempt_conventional_repair(nanorq *rq, struct block_encoder *dec,
       goto out;
   }
 
+  if (!ops_run_pivoted(dec->D, dec->stride, &dec->S))
+    goto out;
+
   dec->core = core;
-  ops_run(&dec->core, dec->D, dec->stride, &dec->S);
   dec->inversion_core = &dec->core;
   dec->inverted = true;
   success = write_recovered_block(rq, dec, sbn, io);

@@ -635,7 +635,7 @@ static bool precalc_covers_unequal_blocks(void) {
         "both partition block sizes must be precalculated");
   nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
                                    nanorq_oti_scheme_specific(enc));
-  CHECK(dec, "precalc unequal decoder");
+  CHECK(dec && nanorq_precalculate(dec), "precalc unequal decoder");
   for (unsigned sbn = 0; sbn < 2; sbn++) {
     unsigned K = nanorq_block_symbols(enc, sbn);
     CHECK(nanorq_generate_symbols(enc, sbn, src_io), "generate via precalc");
@@ -651,6 +651,11 @@ static bool precalc_covers_unequal_blocks(void) {
             "add unequal precalc");
     }
     CHECK(nanorq_repair_block(dec, dec_io, sbn), "repair unequal precalc");
+    uint8_t reencoded[T];
+    CHECK(nanorq_encode(enc, packet, K + 1, sbn, src_io) == T &&
+              nanorq_encode(dec, reencoded, K + 1, sbn, dec_io) == T &&
+              memcmp(packet, reencoded, T) == 0,
+          "re-encode unequal block using its decoder permutation");
   }
   CHECK(memcmp(source, decoded, sizeof(source)) == 0,
         "unequal precalc roundtrip");

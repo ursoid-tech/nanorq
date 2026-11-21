@@ -200,7 +200,6 @@ bool nanorq_core_generate(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len) {
   if (!rq || !prep_mem || pm_len == 0)
     return false;
   rq->W.u = 0;
-  rq->W.inverted = false;
   if (!assign_prepare_memory(rq, prep_mem, pm_len))
     return false;
   precode_matrix_gen(&rq->P, &rq->W);
@@ -246,7 +245,6 @@ void nanorq_core_replace_symbol(nanorq_core *rq, u32 row, u32 esi) {
     X += (P->Kprime - P->K);
   }
   W->u = 0;
-  W->inverted = false;
   uv_clear(W->A[row]);
   params_set_idxs(P, X, &W->A[row]);
 }
@@ -257,7 +255,6 @@ bool nanorq_core_patch_matrix(nanorq_core *rq) {
   pc *W = &rq->W;
   if (!W->cnz.a || !W->nz.a || !W->NZT)
     return false;
-  W->inverted = false;
 
   for (u32 i = 0; i < W->cols; i++) {
     uv_A(W->cnz, i) = 0;
@@ -352,7 +349,6 @@ static bool assign_work_memory(nanorq_core *rq, u8 *mem, size_t len) {
 bool nanorq_core_precalculate(nanorq_core *rq, u8 *work_mem, size_t wm_len) {
   if (!rq || !work_mem || wm_len == 0)
     return false;
-  rq->W.inverted = false;
   if (!assign_work_memory(rq, work_mem, wm_len))
     return false;
   return precode_matrix_invert(&rq->P, &rq->W);
