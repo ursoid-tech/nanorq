@@ -25,10 +25,10 @@ struct oblas_impl {
     void (*axpyb32)(uint8_t *a, uint32_t *b, uint8_t u, unsigned k);
     size_t align_size;
     void (*swap)(uint8_t *a, uint8_t *b, unsigned k);
-    /* run batch of row ops (fusing same-source AXPY); reverse_xor runs u=1 in reverse */
+    /* run the recorded row operations in forward or reverse order */
     void (*row_ops)(uint8_t *matrix, unsigned stride,
                     const struct oblas_row_op *ops, size_t count,
-                    int reverse_xor);
+                    int reverse);
     /* set/accumulate 4-way XOR into disjoint dst; sources may alias each other */
     void (*xor_set4)(uint8_t *dst, const uint8_t *r0, const uint8_t *r1,
                      const uint8_t *r2, const uint8_t *r3, unsigned k);

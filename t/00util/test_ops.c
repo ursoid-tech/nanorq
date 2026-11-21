@@ -86,13 +86,8 @@ static void reference_forward(uint8_t *d, uint32_t stride, const schedule *s,
 
 static void reference_replay(uint8_t *d, uint32_t stride, const schedule *s) {
   reference_forward(d, stride, s, 0, s->cp[1]);
-  for (size_t opidx = s->cp[0]; opidx-- > 0;) {
-    const sched_op *op = &s->ops.a[opidx];
-    uint8_t *dst = d + (size_t)op->i * stride;
-    const uint8_t *src = d + (size_t)op->j * stride;
-    for (uint32_t byte = 0; byte < stride; byte++)
-      dst[byte] ^= src[byte];
-  }
+  for (size_t opidx = s->cp[0]; opidx-- > 0;)
+    reference_forward(d, stride, s, opidx, opidx + 1);
   reference_forward(d, stride, s, s->cp[1], s->ops.n);
   reference_forward(d, stride, s, 0, s->cp[0]);
 }
@@ -262,7 +257,7 @@ static void small_replay_and_mixing(void) {
   fixture_free(&f);
 
   /* test 4- and 2-way batches, repeated destinations, scales, and splits */
-  sched_op operations[] = {{1, 1, 0},   {1, 2, 0},   {1, 3, 0},    {1, 4, 0},
+  sched_op operations[] = {{1, 1, 0},   {13, 2, 0},  {1, 0, 0},    {0, 4, 99},
                            {1, 5, 0},   {1, 6, 0},   {1, 7, 0},    {1, 8, 0},
                            {1, 8, 0},   {1, 0, 8},   {73, 9, 1},   {73, 10, 1},
                            {73, 11, 1}, {73, 12, 1}, {255, 13, 2}, {255, 14, 2},

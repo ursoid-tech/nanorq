@@ -360,11 +360,14 @@ static void check_row_ops_case(const char *name, struct oblas_impl impl,
   for (unsigned i = 0; i < MAX_OPS; i++) {
     unsigned source = (i / 8 + trial) % ROWS;
     unsigned dest = (source + dest_offsets[i % COUNT(dest_offsets)]) % ROWS;
+    /* Exercise writes to the common source at every position in a group. */
+    if ((trial & 1) && i % 8 == (trial / 2) % 8)
+      dest = source;
     uint8_t coefficient = i % 8 < 4 ? 1 : (uint8_t)(trial + i * 73);
     if (!coefficient)
       coefficient = 255;
-    ops[i] = (struct oblas_row_op){reverse ? 1 : coefficient, dest, source};
-    if (!reverse && i % 11 == 8) {
+    ops[i] = (struct oblas_row_op){coefficient, dest, source};
+    if (i % 11 == 8) {
       /* scales interrupt groups and consume only the low byte of j */
       ops[i].u = 0;
       ops[i].j = 256u + (uint8_t)(trial + i * 37);
@@ -374,11 +377,10 @@ static void check_row_ops_case(const char *name, struct oblas_impl impl,
   for (size_t step = 0; step < count; step++) {
     const struct oblas_row_op *op = &ops[reverse ? count - 1 - step : step];
     uint8_t *dst = ref + (size_t)op->i * stride;
-    if (reverse || op->u) {
+    if (op->u) {
       const uint8_t *src = ref + (size_t)op->j * stride;
-      uint8_t coefficient = reverse ? 1 : op->u;
       for (unsigned i = 0; i < stride; i++)
-        dst[i] ^= reference_products[coefficient][src[i]];
+        dst[i] ^= reference_products[op->u][src[i]];
     } else {
       for (unsigned i = 0; i < stride; i++)
         dst[i] = reference_products[(uint8_t)op->j][dst[i]];

@@ -165,68 +165,52 @@ static inline void obl_prefetch_row_w(const u8 *p, unsigned k)
 }
 
 #define OBL_ROW_OPS(suffix, attr, AXPY, SCAL, AXPY2, AXPY4)                           \
+    attr OBL_INLINE void obl_replay_##suffix(u8 *D, unsigned stride,                  \
+                                            const struct oblas_row_op *ops,           \
+                                            size_t count, int step)                   \
+    {                                                                                 \
+        size_t left = count;                                                          \
+        while (left) {                                                                \
+            const struct oblas_row_op *op = ops + (step > 0 ? count - left : left - 1);\
+            if (left > 8)                                                             \
+                obl_prefetch_row_w(D + (size_t)op[8 * step].i * stride, stride);      \
+            u8 *dst = D + (size_t)op->i * stride;                                     \
+            u32 j = op->j;                                                            \
+            if (!op->u) {                                                             \
+                SCAL(dst, (u8)j, stride);                                             \
+                left--;                                                               \
+            } else if (op->i == j) {                                                  \
+                SCAL(dst, (u8)(1 ^ op->u), stride);                                   \
+                left--;                                                               \
+            } else if (left >= 2 && op[step].u && op[step].j == j) {                  \
+                u8 *src = D + (size_t)j * stride;                                     \
+                u8 *d1 = D + (size_t)op[step].i * stride;                             \
+                /* Only the last destination may overwrite the shared source. */      \
+                if (left >= 4 && op[step].i != j && op[2 * step].u &&                 \
+                    op[2 * step].j == j && op[2 * step].i != j &&                     \
+                    op[3 * step].u && op[3 * step].j == j) {                          \
+                    AXPY4(dst, d1, D + (size_t)op[2 * step].i * stride,               \
+                          D + (size_t)op[3 * step].i * stride, src, op->u,            \
+                          op[step].u, op[2 * step].u, op[3 * step].u, stride);        \
+                    left -= 4;                                                        \
+                } else {                                                              \
+                    AXPY2(dst, d1, src, op->u, op[step].u, stride);                   \
+                    left -= 2;                                                        \
+                }                                                                     \
+            } else {                                                                  \
+                AXPY(dst, D + (size_t)j * stride, op->u, stride);                     \
+                left--;                                                               \
+            }                                                                         \
+        }                                                                             \
+    }                                                                                 \
     attr static void obl_row_ops_##suffix(u8 *D, unsigned stride,                     \
                                           const struct oblas_row_op *ops,             \
-                                          size_t count, int reverse_xor)              \
+                                          size_t count, int reverse)                  \
     {                                                                                 \
-        if (reverse_xor) {                                                            \
-            size_t idx = count;                                                       \
-            while (idx > 0) {                                                         \
-                if (idx > 8)                                                          \
-                    obl_prefetch_row_w(D + (size_t)ops[idx - 8].i * stride, stride);  \
-                u32 j = ops[idx - 1].j;                                               \
-                if (idx >= 4 && ops[idx - 2].j == j && ops[idx - 3].j == j &&         \
-                    ops[idx - 4].j == j) {                                            \
-                    AXPY4(D + (size_t)ops[idx - 1].i * stride,                        \
-                          D + (size_t)ops[idx - 2].i * stride,                        \
-                          D + (size_t)ops[idx - 3].i * stride,                        \
-                          D + (size_t)ops[idx - 4].i * stride,                        \
-                          D + (size_t)j * stride, 1, 1, 1, 1, stride);                \
-                    idx -= 4;                                                         \
-                } else if (idx >= 2 && ops[idx - 2].j == j) {                         \
-                    AXPY2(D + (size_t)ops[idx - 1].i * stride,                        \
-                          D + (size_t)ops[idx - 2].i * stride,                        \
-                          D + (size_t)j * stride, 1, 1, stride);                      \
-                    idx -= 2;                                                         \
-                } else {                                                              \
-                    AXPY(D + (size_t)ops[idx - 1].i * stride,                         \
-                         D + (size_t)j * stride, 1, stride);                          \
-                    idx--;                                                            \
-                }                                                                     \
-            }                                                                         \
-            return;                                                                   \
-        }                                                                             \
-        size_t idx = 0;                                                               \
-        while (idx < count) {                                                         \
-            if (count - idx > 8)                                                      \
-                obl_prefetch_row_w(D + (size_t)ops[idx + 8].i * stride, stride);      \
-            u32 j = ops[idx].j;                                                       \
-            u8 u = ops[idx].u;                                                        \
-            if (u && count - idx >= 4 && ops[idx + 1].u && ops[idx + 1].j == j &&     \
-                ops[idx + 2].u && ops[idx + 2].j == j && ops[idx + 3].u &&            \
-                ops[idx + 3].j == j) {                                                \
-                AXPY4(D + (size_t)ops[idx].i * stride,                                \
-                      D + (size_t)ops[idx + 1].i * stride,                            \
-                      D + (size_t)ops[idx + 2].i * stride,                            \
-                      D + (size_t)ops[idx + 3].i * stride,                            \
-                      D + (size_t)j * stride, u, ops[idx + 1].u,                      \
-                      ops[idx + 2].u, ops[idx + 3].u, stride);                        \
-                idx += 4;                                                             \
-            } else if (u && count - idx >= 2 && ops[idx + 1].u &&                     \
-                       ops[idx + 1].j == j) {                                         \
-                AXPY2(D + (size_t)ops[idx].i * stride,                                \
-                      D + (size_t)ops[idx + 1].i * stride,                            \
-                      D + (size_t)j * stride, u, ops[idx + 1].u, stride);             \
-                idx += 2;                                                             \
-            } else {                                                                  \
-                if (u)                                                                \
-                    AXPY(D + (size_t)ops[idx].i * stride,                             \
-                         D + (size_t)j * stride, u, stride);                          \
-                else                                                                  \
-                    SCAL(D + (size_t)ops[idx].i * stride, (u8)j, stride);             \
-                idx++;                                                                \
-            }                                                                         \
-        }                                                                             \
+        if (reverse)                                                                  \
+            obl_replay_##suffix(D, stride, ops, count, -1);                           \
+        else                                                                          \
+            obl_replay_##suffix(D, stride, ops, count, 1);                            \
     }
 
 OBL_ROW_OPS(ref, , obl_axpy_ref, obl_scal_ref_wrapper, obl_axpy2_ref, obl_axpy4_ref)
