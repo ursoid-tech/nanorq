@@ -81,7 +81,6 @@ struct precalc_entry {
   nanorq_core *core;
   uint8_t *prep_mem;
   uint8_t *work_mem;
-  size_t work_len;
   schedule *S;
 };
 
@@ -536,30 +535,6 @@ size_t nanorq_blocks(nanorq *rq) {
   return rq ? (size_t)(rq->src_part.JL + rq->src_part.JS) : 0;
 }
 
-/* retain scratch storage across block resets */
-static bool reserve_scratch(uint8_t **mem, size_t *capacity, size_t bytes) {
-  if (bytes == 0)
-    return false;
-  if (*mem && *capacity >= bytes)
-    return true;
-  uint8_t *next = (uint8_t *)realloc(*mem, bytes);
-  if (!next)
-    return false;
-  *mem = next;
-  *capacity = bytes;
-  return true;
-}
-
-/* optional replay copy; fall back to required solver workspace */
-static bool reserve_work_scratch(nanorq_core *core, uint32_t stride,
-                                 uint8_t **mem, size_t *capacity) {
-  size_t required = nanorq_core_calculate_prepared_work_memory(core);
-  size_t replay = ops_replay_scratch_bytes(core, stride);
-  if (replay > required && reserve_scratch(mem, capacity, replay))
-    return true;
-  return reserve_scratch(mem, capacity, required);
-}
-
 static bool build_precalc_entry(nanorq *rq, uint16_t K,
                                 struct precalc_entry *out) {
   if (!rq || !out || K == 0)
@@ -577,11 +552,8 @@ static bool build_precalc_entry(nanorq *rq, uint16_t K,
   if (!prep_mem || !nanorq_core_prepare(core, prep_mem, prep_len))
     goto fail;
 
-  size_t work_len = 0;
-  size_t align = get_align_size();
-  uint32_t stride = (uint32_t)(((rq->common.T + align - 1) / align) * align);
-  if (!reserve_work_scratch(core, stride, &work_mem, &work_len))
-    goto fail;
+  size_t work_len = nanorq_core_calculate_prepared_work_memory(core);
+  work_mem = (uint8_t *)malloc(work_len);
   S = (schedule *)calloc(1, sizeof(schedule));
   size_t sched_bytes = ops_estimate_schedule_bytes(K);
   sched_mem = malloc(sched_bytes);
@@ -597,7 +569,6 @@ static bool build_precalc_entry(nanorq *rq, uint16_t K,
   out->core = core;
   out->prep_mem = prep_mem;
   out->work_mem = work_mem;
-  out->work_len = work_len;
   out->S = S;
   return true;
 
@@ -627,6 +598,20 @@ bool nanorq_precalculate(nanorq *rq) {
       return false;
     }
   }
+  return true;
+}
+
+/* retain scratch storage across block resets */
+static bool reserve_scratch(uint8_t **mem, size_t *capacity, size_t bytes) {
+  if (bytes == 0)
+    return false;
+  if (*mem && *capacity >= bytes)
+    return true;
+  uint8_t *next = (uint8_t *)realloc(*mem, bytes);
+  if (!next)
+    return false;
+  *mem = next;
+  *capacity = bytes;
   return true;
 }
 
@@ -693,8 +678,7 @@ bool nanorq_generate_symbols(nanorq *rq, uint8_t sbn, struct ioctx *io) {
 
   struct precalc_entry *pc_ent = find_precalc_entry(rq, enc->K);
   if (pc_ent) {
-    ops_run_with_scratch(pc_ent->core, enc->D, enc->stride, pc_ent->S,
-                         pc_ent->work_mem, pc_ent->work_len);
+    ops_run(pc_ent->core, enc->D, enc->stride, pc_ent->S);
     enc->inversion_core = pc_ent->core;
     enc->inverted = true;
     return true;
@@ -707,8 +691,8 @@ bool nanorq_generate_symbols(nanorq *rq, uint8_t sbn, struct ioctx *io) {
       !nanorq_core_prepare(&enc->core, enc->prep_mem, enc->prep_len))
     return false;
 
-  if (!reserve_work_scratch(&enc->core, enc->stride, &enc->work_mem,
-                            &enc->work_len) ||
+  size_t work_len = nanorq_core_calculate_prepared_work_memory(&enc->core);
+  if (!reserve_scratch(&enc->work_mem, &enc->work_len, work_len) ||
       !reset_schedule(&enc->S, &enc->sched_cap, enc->K))
     return false;
 
@@ -717,8 +701,7 @@ bool nanorq_generate_symbols(nanorq *rq, uint8_t sbn, struct ioctx *io) {
       enc->S.overflowed || enc->S.cpidx != 2)
     return false;
 
-  ops_run_with_scratch(&enc->core, enc->D, enc->stride, &enc->S, enc->work_mem,
-                       enc->work_len);
+  ops_run(&enc->core, enc->D, enc->stride, &enc->S);
   enc->inversion_core = &enc->core;
   enc->inverted = true;
 
@@ -1240,9 +1223,9 @@ static bool attempt_conventional_repair(nanorq *rq, struct block_encoder *dec,
 
   if (!nanorq_core_patch_matrix(&core))
     goto out;
+  size_t work_len = nanorq_core_calculate_prepared_work_memory(&core);
   if (!ensure_mix_buf(dec) ||
-      !reserve_work_scratch(&core, dec->stride, &dec->work_mem,
-                            &dec->work_len) ||
+      !reserve_scratch(&dec->work_mem, &dec->work_len, work_len) ||
       !reset_schedule(&dec->S, &dec->sched_cap, (uint32_t)dec->K + overhead))
     goto out;
 
@@ -1270,8 +1253,7 @@ static bool attempt_conventional_repair(nanorq *rq, struct block_encoder *dec,
   }
 
   dec->core = core;
-  ops_run_with_scratch(&dec->core, dec->D, dec->stride, &dec->S, dec->work_mem,
-                       dec->work_len);
+  ops_run(&dec->core, dec->D, dec->stride, &dec->S);
   dec->inversion_core = &dec->core;
   dec->inverted = true;
   success = write_recovered_block(rq, dec, sbn, io);

@@ -22,18 +22,7 @@ void ops_push(void *arg, u32 i, u32 j, u8 u) {
   }
 }
 
-size_t ops_replay_scratch_bytes(nanorq_core *rq, uint32_t stride) {
-  if (!rq || !stride)
-    return 0;
-  size_t rows = nanorq_core_get_pc_rows(rq);
-  if (rows > SIZE_MAX / stride)
-    return 0;
-  size_t bytes = rows * stride;
-  return bytes >= (16U << 20) ? bytes : 0;
-}
-
-void ops_run_with_scratch(nanorq_core *rq, uint8_t *D, uint32_t stride,
-                          schedule *S, void *scratch, size_t scratch_bytes) {
+void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S) {
   if (!rq || !D || stride == 0 || !S || !S->ops.a || S->cpidx != 2 ||
       S->overflowed || S->cp[0] > S->cp[1] || S->cp[1] > S->ops.n)
     return;
@@ -41,34 +30,11 @@ void ops_run_with_scratch(nanorq_core *rq, uint8_t *D, uint32_t stride,
   void (*row_ops)(u8 *, unsigned, const struct oblas_row_op *, size_t, int) =
       nanorq_oblas.row_ops;
 
-  /* skip phase-1 undo when caller provides a disjoint copy buffer */
-  size_t mat_bytes = ops_replay_scratch_bytes(rq, stride);
-  if (scratch && rq->W.inverted && mat_bytes && scratch_bytes >= mat_bytes) {
-    uintptr_t a = (uintptr_t)scratch, b = (uintptr_t)D;
-    bool disjoint = a < b ? b - a >= mat_bytes : a - b >= mat_bytes;
-    if (disjoint) {
-      uint8_t *bkp = (uint8_t *)scratch;
-      memcpy(bkp, D, mat_bytes);
-      row_ops(bkp, stride, S->ops.a, S->cp[1], 0);
-      for (u32 pos = rq->W.i; pos < rq->W.rows; pos++) {
-        u32 drow = uv_A(rq->W.d, pos);
-        memcpy(D + (size_t)drow * stride, bkp + (size_t)drow * stride, stride);
-      }
-      row_ops(D, stride, S->ops.a + S->cp[1], S->ops.n - S->cp[1], 0);
-      row_ops(D, stride, S->ops.a, S->cp[0], 0);
-      return;
-    }
-  }
-
   row_ops(D, stride, S->ops.a, S->cp[1], 0);
   if (S->cp[0] > 0)
     row_ops(D, stride, S->ops.a, S->cp[0], 1);
   row_ops(D, stride, S->ops.a + S->cp[1], S->ops.n - S->cp[1], 0);
   row_ops(D, stride, S->ops.a, S->cp[0], 0);
-}
-
-void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S) {
-  ops_run_with_scratch(rq, D, stride, S, NULL, 0);
 }
 
 void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
@@ -223,7 +189,7 @@ bool nanorq_core_encode_simple(uint8_t *src_data, uint32_t K, uint16_t T,
     return false;
   }
 
-  ops_run_with_scratch(&rq, D, T, &S_enc, work_mem, reqs.work_bytes);
+  ops_run(&rq, D, T, &S_enc);
 
   for (uint32_t i = 0; i < num_repair; i++) {
     ops_mix(&rq, D, T, K + i, repair_out + (size_t)i * T);

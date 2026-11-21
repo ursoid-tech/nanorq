@@ -26,8 +26,7 @@ static void *checked_malloc(size_t bytes) {
   return ptr;
 }
 
-static void fixture_init(struct fixture *f, uint32_t k, uint32_t overhead,
-                         size_t min_work) {
+static void fixture_init(struct fixture *f, uint32_t k, uint32_t overhead) {
   memset(f, 0, sizeof(*f));
   CHECK(nanorq_core_encoder_new(k, overhead, &f->rq), "initialize core");
   size_t prep_bytes = nanorq_core_calculate_prepare_memory(&f->rq) + 64;
@@ -42,8 +41,6 @@ static void fixture_init(struct fixture *f, uint32_t k, uint32_t overhead,
   CHECK(schedule_init(&f->schedule, f->schedule_mem, schedule_bytes),
         "initialize schedule");
   f->work_bytes = nanorq_core_calculate_prepared_work_memory(&f->rq) + 64;
-  if (f->work_bytes < min_work)
-    f->work_bytes = min_work;
   f->work = checked_malloc(f->work_bytes);
   nanorq_core_set_op_callback(&f->rq, &f->schedule, ops_push);
   CHECK(nanorq_core_precalculate(&f->rq, f->work, f->work_bytes),
@@ -217,7 +214,12 @@ static void small_replay_and_mixing(void) {
   static const uint32_t strides[] = {1,  2,  7,  15,  16,  17,  31,  32,  33,
                                      63, 64, 65, 127, 128, 129, 257, 1281};
   struct fixture f;
-  fixture_init(&f, 64, 0, 0);
+  fixture_init(&f, 64, 2);
+  /* callers may immediately repurpose or free inversion workspace */
+  memset(f.work, 0xa5, f.work_bytes);
+  compare_schedule(&f.rq, &f.schedule, 65);
+  CHECK(all_bytes(f.work, f.work_bytes, 0xa5),
+        "replay must not access repurposed inversion workspace");
   free(f.work);
   f.work = NULL;
   for (size_t idx = 0; idx < sizeof(strides) / sizeof(strides[0]); idx++) {
@@ -257,82 +259,10 @@ static void reject_invalid_checkpoints(void) {
   CHECK(d[0] == 7 && d[1] == 11, "reject checkpoint past schedule");
 }
 
-static void large_workspace_and_scratch(void) {
-  nanorq_core shape = {0};
-  CHECK(nanorq_core_encoder_new(10, 2, &shape), "large matrix shape");
-  uint32_t rows = nanorq_core_get_pc_rows(&shape);
-  /* reach the replay threshold with a small, fast schedule */
-  uint32_t stride = (((16U << 20) / rows + 63U) & ~63U) + 1;
-  size_t bytes = (size_t)rows * stride;
-  CHECK(bytes > (16U << 20), "exercise large-matrix replay optimization");
-  struct fixture f;
-  fixture_init(&f, 10, 2, bytes);
-  size_t scratch_bytes = ops_replay_scratch_bytes(&f.rq, stride);
-  CHECK(scratch_bytes >= bytes, "large replay reports optional scratch size");
-  uint8_t *input = checked_malloc(bytes);
-  uint8_t *reference = checked_malloc(bytes);
-  uint8_t *storage = checked_malloc(bytes + 16);
-  uint8_t *d = storage + 5;
-  uint8_t *scratch_storage = checked_malloc(scratch_bytes + 16);
-  uint8_t *scratch = scratch_storage + 7;
-  fill_bytes(input, bytes);
-  memcpy(reference, input, bytes);
-
-  /* callers may immediately repurpose inversion workspace for other data */
-  memset(f.work, 0xa5, f.work_bytes);
-  ops_run(&f.rq, reference, stride, &f.schedule);
-  CHECK(all_bytes(f.work, f.work_bytes, 0xa5),
-        "ordinary replay must not access repurposed inversion workspace");
-  free(f.work);
-  f.work = NULL;
-
-  for (unsigned mode = 0; mode < 7; mode++) {
-    memset(storage, 0xc3, bytes + 16);
-    memcpy(d, input, bytes);
-    memset(scratch_storage, 0xa5, scratch_bytes + 16);
-    if (mode == 0)
-      ops_run(&f.rq, d, stride, &f.schedule);
-    else if (mode == 1)
-      ops_run_with_scratch(&f.rq, d, stride, &f.schedule, scratch,
-                           scratch_bytes);
-    else if (mode == 2)
-      ops_run_with_scratch(&f.rq, d, stride, &f.schedule, scratch,
-                           scratch_bytes - 1);
-    else if (mode == 3)
-      ops_run_with_scratch(&f.rq, d, stride, &f.schedule, NULL, scratch_bytes);
-    else
-      ops_run_with_scratch(&f.rq, d, stride, &f.schedule,
-                           mode == 4   ? d
-                           : mode == 5 ? d + 1
-                                       : d - 1,
-                           scratch_bytes);
-    CHECK(memcmp(d, reference, bytes) == 0,
-          "explicit scratch, absent scratch, and invalid scratch agree");
-    CHECK(all_bytes(storage, 5, 0xc3) && all_bytes(d + bytes, 11, 0xc3),
-          "overlapping scratch must not touch matrix guards");
-    if (mode == 1) {
-      CHECK(!all_bytes(scratch, scratch_bytes, 0xa5),
-            "large replay must use sufficient disjoint scratch");
-      CHECK(all_bytes(scratch_storage, 7, 0xa5) &&
-                all_bytes(scratch + scratch_bytes, 9, 0xa5),
-            "scratch guards remain intact");
-    } else {
-      CHECK(all_bytes(scratch_storage, scratch_bytes + 16, 0xa5),
-            "fallback leaves unused scratch untouched");
-    }
-  }
-  free(scratch_storage);
-  free(storage);
-  free(reference);
-  free(input);
-  fixture_free(&f);
-}
-
 int main(void) {
   canonical_mixing_before_inversion();
   small_replay_and_mixing();
   reject_invalid_checkpoints();
-  large_workspace_and_scratch();
   puts("schedule replay regressions passed");
   return 0;
 }

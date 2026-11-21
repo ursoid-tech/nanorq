@@ -8,23 +8,14 @@
 
 /* compile high-level code directly to inject scratch allocation faults */
 static unsigned alloc_fail_at, alloc_calls;
-static size_t alloc_max_bytes, alloc_rejections;
 static void *api_test_malloc(size_t bytes) {
   if (alloc_fail_at && ++alloc_calls == alloc_fail_at)
     return NULL;
-  if (alloc_max_bytes && bytes > alloc_max_bytes) {
-    alloc_rejections++;
-    return NULL;
-  }
   return malloc(bytes);
 }
 static void *api_test_realloc(void *ptr, size_t bytes) {
   if (alloc_fail_at && ++alloc_calls == alloc_fail_at)
     return NULL;
-  if (alloc_max_bytes && bytes > alloc_max_bytes) {
-    alloc_rejections++;
-    return NULL;
-  }
   return realloc(ptr, bytes);
 }
 #define malloc api_test_malloc
@@ -501,78 +492,6 @@ static bool decoded_blocks_keep_their_permutation(void) {
   return true;
 }
 
-/* reject only the optional matrix copy, allowing ordinary solver workspace */
-static bool replay_scratch_allocation_is_optional(void) {
-  enum { K = 256, T = 65535 };
-  size_t bytes = (size_t)K * T;
-  uint8_t *source = malloc(bytes), *decoded = malloc(bytes);
-  uint8_t *packet = malloc(T), *expected = malloc(T);
-  CHECK(source && decoded && packet && expected, "replay fallback buffers");
-  for (size_t i = 0; i < bytes; i++)
-    source[i] = (uint8_t)(i * 29U + (i >> 8) * 7U + 3U);
-  struct ioctx *src_io = ioctx_from_mem_ro(source, bytes);
-  struct ioctx *dec_io = ioctx_from_mem(decoded, bytes);
-  nanorq *enc = nanorq_encoder_new_ex(bytes, T, K, 1, 1);
-  CHECK(src_io && dec_io && enc, "replay fallback setup");
-
-  alloc_max_bytes = 8U << 20;
-  alloc_rejections = 0;
-  CHECK(nanorq_precalculate(enc), "precalculate with ordinary solver memory");
-  CHECK(alloc_rejections == 1, "reject optional precalculated replay memory");
-  CHECK(nanorq_encode(enc, expected, K, 0, src_io) == T,
-        "replay precalculated schedule without optional memory");
-  nanorq_free(enc);
-
-  enc = nanorq_encoder_new_ex(bytes, T, K, 1, 1);
-  CHECK(enc, "uncached replay fallback encoder");
-  nanorq *dec = nanorq_decoder_new(nanorq_oti_common(enc),
-                                   nanorq_oti_scheme_specific(enc));
-  CHECK(dec, "replay fallback decoder");
-  for (unsigned trial = 0; trial < 2; trial++) {
-    alloc_rejections = 0;
-    CHECK(nanorq_generate_symbols(enc, 0, src_io),
-          "generate with ordinary solver memory");
-    CHECK(alloc_rejections == 1, "reject optional encoder replay memory");
-    CHECK(nanorq_encode(enc, packet, K, 0, src_io) == T &&
-              memcmp(packet, expected, T) == 0,
-          "cached and ordinary generation produce the same repair symbol");
-    memset(decoded, 0, bytes);
-    for (unsigned esi = 1; esi < K; esi++)
-      CHECK(nanorq_decoder_add_symbol(dec, source + (size_t)esi * T,
-                                      nanorq_tag(0, esi),
-                                      dec_io) == NANORQ_SYM_ADDED,
-            "add source with bounded scratch");
-    for (unsigned esi = K; esi < K + 3; esi++) {
-      CHECK(nanorq_encode(enc, packet, esi, 0, src_io) == T,
-            "encode repair with bounded scratch");
-      CHECK(nanorq_decoder_add_symbol(dec, packet, nanorq_tag(0, esi),
-                                      dec_io) == NANORQ_SYM_ADDED,
-            "add repair with bounded scratch");
-    }
-    alloc_rejections = 0;
-    CHECK(nanorq_repair_block(dec, dec_io, 0),
-          "repair with ordinary solver memory");
-    CHECK(alloc_rejections == 1, "reject optional decoder replay memory");
-    CHECK(memcmp(source, decoded, bytes) == 0,
-          "replay fallback recovers original bytes");
-    CHECK(nanorq_encode(dec, packet, K, 0, dec_io) == T &&
-              memcmp(packet, expected, T) == 0,
-          "repaired fallback block re-encodes correctly");
-    nanorq_encoder_reset(enc, 0);
-    nanorq_encoder_reset(dec, 0);
-  }
-  alloc_max_bytes = 0;
-  nanorq_free(dec);
-  nanorq_free(enc);
-  dec_io->destroy(dec_io);
-  src_io->destroy(src_io);
-  free(expected);
-  free(packet);
-  free(decoded);
-  free(source);
-  return true;
-}
-
 static bool mmap_tracks_logical_size(void) {
   char path[] = "/tmp/nanorq-io-XXXXXX";
   int fd = mkstemp(path);
@@ -758,8 +677,6 @@ static bool run_regressions(void) {
         "scratch allocation retry regression");
   CHECK(decoded_blocks_keep_their_permutation(),
         "decoded re-encoding regression");
-  CHECK(replay_scratch_allocation_is_optional(),
-        "optional replay memory regression");
   CHECK(mmap_tracks_logical_size(), "mmap logical size regression");
   CHECK(tsnc_relay_large_k(), "tsnc large-k relay regression");
   CHECK(high_overhead_burst_repair(), "high-overhead burst repair regression");

@@ -25,13 +25,6 @@ bool schedule_init(schedule *S, void *buf, size_t buf_bytes);
 void ops_push(void *arg, u32 i, u32 j, u8 u);
 /* replay schedule on D; keep prepare memory live for ops_mix */
 void ops_run(nanorq_core *rq, uint8_t *D, uint32_t stride, schedule *S);
-
-/* optional replay scratch size, or 0 when unused */
-size_t ops_replay_scratch_bytes(nanorq_core *rq, uint32_t stride);
-
-/* replay schedule with optional disjoint scratch buffer */
-void ops_run_with_scratch(nanorq_core *rq, uint8_t *D, uint32_t stride,
-                          schedule *S, void *scratch, size_t scratch_bytes);
 /* mix packet esi into ptr (disjoint from D or one exact row of D) */
 void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr);
 size_t ops_estimate_schedule_bytes(uint32_t K);
