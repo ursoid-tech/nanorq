@@ -67,6 +67,8 @@ static bool init_core_params(u32 K, u32 overhead, bool gf2_only,
     return false;
   rq->overhead = overhead;
   rq->W.u = 0; /* active width unset until prepare or patch */
+  rq->W.work_base = NULL;
+  rq->W.work_len = 0;
   nanorq_core_init();
   return true;
 }
@@ -198,6 +200,8 @@ bool nanorq_core_generate(nanorq_core *rq, uint8_t *prep_mem, size_t pm_len) {
   if (!rq || !prep_mem || pm_len == 0)
     return false;
   rq->W.u = 0;
+  rq->W.work_base = NULL;
+  rq->W.work_len = 0;
   if (!assign_prepare_memory(rq, prep_mem, pm_len))
     return false;
   precode_matrix_gen(&rq->P, &rq->W);
@@ -243,6 +247,8 @@ void nanorq_core_replace_symbol(nanorq_core *rq, u32 row, u32 esi) {
     X += (P->Kprime - P->K);
   }
   W->u = 0;
+  W->work_base = NULL;
+  W->work_len = 0;
   uv_clear(W->A[row]);
   params_set_idxs(P, X, &W->A[row]);
 }
@@ -317,6 +323,8 @@ static bool assign_work_memory(nanorq_core *rq, u8 *mem, size_t len) {
   arena *a = &W->work_mem;
   a->beg = mem;
   a->end = mem + len;
+  W->work_base = mem;
+  W->work_len = len;
 
   u32 u_stride = DC(W->u, 32);
   tmp = W->rows * u_stride;

@@ -328,7 +328,7 @@ static struct block_encoder *get_block_encoder(nanorq *rq, uint8_t sbn) {
   }
   /* pack matrix to SIMD alignment */
   size_t align = get_align_size();
-  enc->stride = ((rq->common.T + align - 1) / align) * align;
+  enc->stride = (uint32_t)(((rq->common.T + align - 1) / align) * align);
   if (enc->stride == 0) {
     compat_bitmask_free(&enc->repair_mask);
     free(enc);
@@ -552,6 +552,16 @@ static bool build_precalc_entry(nanorq *rq, uint16_t K,
     goto fail;
 
   size_t work_len = nanorq_core_calculate_prepared_work_memory(core);
+  {
+    size_t align = get_align_size();
+    size_t stride = ((rq->common.T + align - 1) / align) * align;
+    size_t rows = nanorq_core_get_pc_rows(core);
+    if (stride > 0 && rows <= SIZE_MAX / stride) {
+      size_t mat_bytes = rows * stride;
+      if (mat_bytes >= (16U << 20) && mat_bytes > work_len)
+        work_len = mat_bytes;
+    }
+  }
   work_mem = (uint8_t *)malloc(work_len);
   S = (schedule *)calloc(1, sizeof(schedule));
   size_t sched_bytes = ops_estimate_schedule_bytes(K);
@@ -690,6 +700,14 @@ bool nanorq_generate_symbols(nanorq *rq, uint8_t sbn, struct ioctx *io) {
     return false;
 
   size_t work_len = nanorq_core_calculate_prepared_work_memory(&enc->core);
+  {
+    size_t rows = nanorq_core_get_pc_rows(&enc->core);
+    if (rows <= SIZE_MAX / enc->stride) {
+      size_t mat_bytes = rows * enc->stride;
+      if (mat_bytes >= (16U << 20) && mat_bytes > work_len)
+        work_len = mat_bytes;
+    }
+  }
   if (!reserve_scratch(&enc->work_mem, &enc->work_len, work_len) ||
       !reset_schedule(&enc->S, &enc->sched_cap, enc->K))
     return false;
@@ -1222,6 +1240,11 @@ static bool attempt_conventional_repair(nanorq *rq, struct block_encoder *dec,
   if (!nanorq_core_patch_matrix(&core))
     goto out;
   size_t work_len = nanorq_core_calculate_prepared_work_memory(&core);
+  if (rows <= SIZE_MAX / dec->stride) {
+    size_t mat_bytes = rows * dec->stride;
+    if (mat_bytes >= (16U << 20) && mat_bytes > work_len)
+      work_len = mat_bytes;
+  }
   if (!ensure_mix_buf(dec) ||
       !reserve_scratch(&dec->work_mem, &dec->work_len, work_len) ||
       !reset_schedule(&dec->S, &dec->sched_cap, (uint32_t)dec->K + overhead))
