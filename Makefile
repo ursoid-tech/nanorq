@@ -161,8 +161,7 @@ check-embedded:
 		echo "PASS: no libc allocator/assert symbols found"; \
 	fi
 
-valgrind: CPPFLAGS=-Wall -Iinclude -Ideps/ -fPIC
-valgrind: CFLAGS = -O0 -g -std=c11
+valgrind: CFLAGS = -O0 -g -std=c11 -Wall -I. -Iinclude -Ideps/ -fPIC
 valgrind: clean $(TEST_UTILS) $(EXAMPLES)
 	valgrind --leak-check=full --errors-for-leak-kinds=definite --error-exitcode=2 ./t/00util/api_regress
 	valgrind --leak-check=full --errors-for-leak-kinds=definite --error-exitcode=2 ./examples/tsnc_sync > /dev/null
