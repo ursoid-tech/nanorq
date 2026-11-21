@@ -5,6 +5,33 @@
 
 #include <stdatomic.h>
 
+#if defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
+#include <riscv_vector.h>
+
+static void nanorq_axpyb32_rvv(u8 *a, u32 *b, u8 u, unsigned k) {
+  if (u == 0 || k == 0)
+    return;
+  const uint8_t *bm = (const uint8_t *)b;
+  unsigned i = 0;
+  unsigned bulk = k & ~7u;
+  while (i < bulk) {
+    size_t vl = __riscv_vsetvl_e8m2(bulk - i);
+    vl &= ~(size_t)7u;
+    if (vl == 0)
+      break;
+    vbool4_t mask = __riscv_vlm_v_b4(bm + (i >> 3), vl);
+    vuint8m2_t va = __riscv_vle8_v_u8m2(a + i, vl);
+    va = __riscv_vxor_vx_u8m2_mu(mask, va, va, u, vl);
+    __riscv_vse8_v_u8m2(a + i, va, vl);
+    i += (unsigned)vl;
+  }
+  for (; i < k; i++) {
+    if ((bm[i >> 3] >> (i & 7u)) & 1u)
+      a[i] ^= u;
+  }
+}
+#endif
+
 #define ALIGN_VAL(x, align) (((x) + (align) - 1) & ~((align) - 1))
 
 struct oblas_impl nanorq_oblas = {.align_size = 32};
@@ -40,6 +67,9 @@ void nanorq_core_init(void) {
                                               memory_order_acquire)) {
     struct oblas_impl impl = {.align_size = 32};
     oblas_get_impl(&impl);
+#if defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
+    impl.axpyb32 = nanorq_axpyb32_rvv;
+#endif
     nanorq_oblas = impl;
     atomic_store_explicit(&nanorq_oblas_state, 2, memory_order_release);
     return;

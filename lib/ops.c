@@ -11,6 +11,9 @@
 #elif defined(OBLAS_ARCH_ARM) && (defined(__ARM_NEON) || defined(_MSC_VER))
 #include <arm_neon.h>
 #define NANORQ_OPS_NEON 1
+#elif defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
+#include <riscv_vector.h>
+#define NANORQ_OPS_RVV 1
 #endif
 
 enum {
@@ -19,7 +22,8 @@ enum {
   OPS_SIMD_AVX2_GFNI = 2,
   OPS_SIMD_AVX512_STD = 3,
   OPS_SIMD_AVX512_GFNI = 4,
-  OPS_SIMD_NEON = 5
+  OPS_SIMD_NEON = 5,
+  OPS_SIMD_RVV = 6
 };
 
 static atomic_int ops_simd_state = ATOMIC_VAR_INIT(-1);
@@ -47,6 +51,8 @@ static int get_ops_simd(void) {
   }
 #elif defined(NANORQ_OPS_NEON)
   mode = OPS_SIMD_NEON;
+#elif defined(NANORQ_OPS_RVV)
+  mode = OPS_SIMD_RVV;
 #endif
   atomic_store_explicit(&ops_simd_state, mode, memory_order_relaxed);
   return mode;
@@ -1033,6 +1039,41 @@ DEFINE_X86_RUNNERS(avx2_std, TARGET_AVX2, xor256_1, xor256_fanout2,
 #endif /* NANORQ_OPS_X86 */
 
 #if defined(NANORQ_OPS_NEON)
+#if !defined(__aarch64__) && !defined(_M_ARM64)
+static inline uint8x16_t neon_tbl16(uint8x16_t tbl, uint8x16_t idx) {
+  uint8x8x2_t tbl2;
+  tbl2.val[0] = vget_low_u8(tbl);
+  tbl2.val[1] = vget_high_u8(tbl);
+  return vcombine_u8(vtbl2_u8(tbl2, vget_low_u8(idx)),
+                     vtbl2_u8(tbl2, vget_high_u8(idx)));
+}
+#else
+#define neon_tbl16 vqtbl1q_u8
+#endif
+
+static inline void neon_xor1(uint8_t *d0, const uint8_t *src, uint32_t len) {
+  uint32_t i = 0;
+  for (; i + 16 <= len; i += 16)
+    vst1q_u8(d0 + i, veorq_u8(vld1q_u8(d0 + i), vld1q_u8(src + i)));
+  for (; i < len; i++)
+    d0[i] ^= src[i];
+}
+
+static inline void neon_xor2(uint8_t *d0, uint8_t *d1, const uint8_t *src,
+                             uint32_t len) {
+  uint32_t i = 0;
+  for (; i + 16 <= len; i += 16) {
+    uint8x16_t s = vld1q_u8(src + i);
+    vst1q_u8(d0 + i, veorq_u8(vld1q_u8(d0 + i), s));
+    vst1q_u8(d1 + i, veorq_u8(vld1q_u8(d1 + i), s));
+  }
+  for (; i < len; i++) {
+    uint8_t s = src[i];
+    d0[i] ^= s;
+    d1[i] ^= s;
+  }
+}
+
 static inline void neon_xor4(uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3,
                              const uint8_t *src, uint32_t len) {
   uint32_t i = 0;
@@ -1052,16 +1093,126 @@ static inline void neon_xor4(uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3,
   }
 }
 
+static inline void neon_set4(uint8_t *dst, const uint8_t *r0, const uint8_t *r1,
+                             const uint8_t *r2, const uint8_t *r3,
+                             uint32_t len) {
+  uint32_t i = 0;
+  for (; i + 16 <= len; i += 16) {
+    uint8x16_t v01 = veorq_u8(vld1q_u8(r0 + i), vld1q_u8(r1 + i));
+    uint8x16_t v23 = veorq_u8(vld1q_u8(r2 + i), vld1q_u8(r3 + i));
+    vst1q_u8(dst + i, veorq_u8(v01, v23));
+  }
+  for (; i < len; i++)
+    dst[i] = r0[i] ^ r1[i] ^ r2[i] ^ r3[i];
+}
+
+static inline void neon_acc4(uint8_t *dst, const uint8_t *r0, const uint8_t *r1,
+                             const uint8_t *r2, const uint8_t *r3,
+                             uint32_t len) {
+  uint32_t i = 0;
+  for (; i + 16 <= len; i += 16) {
+    uint8x16_t v01 = veorq_u8(vld1q_u8(r0 + i), vld1q_u8(r1 + i));
+    uint8x16_t v23 = veorq_u8(vld1q_u8(r2 + i), vld1q_u8(r3 + i));
+    uint8x16_t acc = veorq_u8(vld1q_u8(dst + i), v01);
+    vst1q_u8(dst + i, veorq_u8(acc, v23));
+  }
+  for (; i < len; i++)
+    dst[i] ^= r0[i] ^ r1[i] ^ r2[i] ^ r3[i];
+}
+
+static inline void neon_gf1(uint8_t *d0, uint8_t u0, const uint8_t *src,
+                            uint32_t len) {
+  const uint8x16_t mask = vdupq_n_u8(0x0f);
+  const uint8x16_t lo0 = vld1q_u8(GF2_8_SHUF_LO + u0 * 16);
+  const uint8x16_t hi0 = vld1q_u8(GF2_8_SHUF_HI + u0 * 16);
+  uint32_t i = 0;
+  for (; i + 16 <= len; i += 16) {
+    uint8x16_t s = vld1q_u8(src + i);
+    uint8x16_t slo = vandq_u8(s, mask);
+    uint8x16_t shi = vshrq_n_u8(s, 4);
+    uint8x16_t p0 = veorq_u8(neon_tbl16(lo0, slo), neon_tbl16(hi0, shi));
+    vst1q_u8(d0 + i, veorq_u8(vld1q_u8(d0 + i), p0));
+  }
+  for (; i < len; i++) {
+    uint8_t b = src[i];
+    if (b)
+      d0[i] ^= gf_mul_scalar(u0, b);
+  }
+}
+
+static inline void neon_gf2(uint8_t *d0, uint8_t *d1, uint8_t u0, uint8_t u1,
+                            const uint8_t *src, uint32_t len) {
+  const uint8x16_t mask = vdupq_n_u8(0x0f);
+  const uint8x16_t lo0 = vld1q_u8(GF2_8_SHUF_LO + u0 * 16);
+  const uint8x16_t hi0 = vld1q_u8(GF2_8_SHUF_HI + u0 * 16);
+  const uint8x16_t lo1 = vld1q_u8(GF2_8_SHUF_LO + u1 * 16);
+  const uint8x16_t hi1 = vld1q_u8(GF2_8_SHUF_HI + u1 * 16);
+  uint32_t i = 0;
+  for (; i + 16 <= len; i += 16) {
+    uint8x16_t s = vld1q_u8(src + i);
+    uint8x16_t slo = vandq_u8(s, mask);
+    uint8x16_t shi = vshrq_n_u8(s, 4);
+    uint8x16_t p0 = veorq_u8(neon_tbl16(lo0, slo), neon_tbl16(hi0, shi));
+    uint8x16_t p1 = veorq_u8(neon_tbl16(lo1, slo), neon_tbl16(hi1, shi));
+    vst1q_u8(d0 + i, veorq_u8(vld1q_u8(d0 + i), p0));
+    vst1q_u8(d1 + i, veorq_u8(vld1q_u8(d1 + i), p1));
+  }
+  for (; i < len; i++) {
+    uint8_t b = src[i];
+    if (b) {
+      d0[i] ^= gf_mul_scalar(u0, b);
+      d1[i] ^= gf_mul_scalar(u1, b);
+    }
+  }
+}
+
+static inline void neon_gf4(uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3,
+                            uint8_t u0, uint8_t u1, uint8_t u2, uint8_t u3,
+                            const uint8_t *src, uint32_t len) {
+  const uint8x16_t mask = vdupq_n_u8(0x0f);
+  const uint8x16_t lo0 = vld1q_u8(GF2_8_SHUF_LO + u0 * 16);
+  const uint8x16_t hi0 = vld1q_u8(GF2_8_SHUF_HI + u0 * 16);
+  const uint8x16_t lo1 = vld1q_u8(GF2_8_SHUF_LO + u1 * 16);
+  const uint8x16_t hi1 = vld1q_u8(GF2_8_SHUF_HI + u1 * 16);
+  const uint8x16_t lo2 = vld1q_u8(GF2_8_SHUF_LO + u2 * 16);
+  const uint8x16_t hi2 = vld1q_u8(GF2_8_SHUF_HI + u2 * 16);
+  const uint8x16_t lo3 = vld1q_u8(GF2_8_SHUF_LO + u3 * 16);
+  const uint8x16_t hi3 = vld1q_u8(GF2_8_SHUF_HI + u3 * 16);
+  uint32_t i = 0;
+  for (; i + 16 <= len; i += 16) {
+    uint8x16_t s = vld1q_u8(src + i);
+    uint8x16_t slo = vandq_u8(s, mask);
+    uint8x16_t shi = vshrq_n_u8(s, 4);
+    uint8x16_t p0 = veorq_u8(neon_tbl16(lo0, slo), neon_tbl16(hi0, shi));
+    uint8x16_t p1 = veorq_u8(neon_tbl16(lo1, slo), neon_tbl16(hi1, shi));
+    uint8x16_t p2 = veorq_u8(neon_tbl16(lo2, slo), neon_tbl16(hi2, shi));
+    uint8x16_t p3 = veorq_u8(neon_tbl16(lo3, slo), neon_tbl16(hi3, shi));
+    vst1q_u8(d0 + i, veorq_u8(vld1q_u8(d0 + i), p0));
+    vst1q_u8(d1 + i, veorq_u8(vld1q_u8(d1 + i), p1));
+    vst1q_u8(d2 + i, veorq_u8(vld1q_u8(d2 + i), p2));
+    vst1q_u8(d3 + i, veorq_u8(vld1q_u8(d3 + i), p3));
+  }
+  for (; i < len; i++) {
+    uint8_t b = src[i];
+    if (b) {
+      d0[i] ^= gf_mul_scalar(u0, b);
+      d1[i] ^= gf_mul_scalar(u1, b);
+      d2[i] ^= gf_mul_scalar(u2, b);
+      d3[i] ^= gf_mul_scalar(u3, b);
+    }
+  }
+}
+
 static void run_fwd_neon(uint8_t *D, uint32_t stride, const sched_op *ops,
                          u32 beg, u32 end) {
-  void (*axpy)(uint8_t *, uint8_t *, uint8_t, uint32_t) = nanorq_oblas.axpy;
   void (*scal)(uint8_t *, uint8_t, uint32_t) = nanorq_oblas.scal;
   u32 idx = beg;
   while (idx < end) {
     if (idx + 8 < end)
       prefetch_row_w(D + (size_t)ops[idx + 8].i * stride, stride);
     u32 j = ops[idx].j;
-    if (ops[idx].u == 1 && idx + 3 < end && ops[idx + 1].u == 1 &&
+    u8 u0 = ops[idx].u;
+    if (u0 == 1 && idx + 3 < end && ops[idx + 1].u == 1 &&
         ops[idx + 1].j == j && ops[idx + 2].u == 1 && ops[idx + 2].j == j &&
         ops[idx + 3].u == 1 && ops[idx + 3].j == j) {
       neon_xor4(
@@ -1069,20 +1220,45 @@ static void run_fwd_neon(uint8_t *D, uint32_t stride, const sched_op *ops,
           D + (size_t)ops[idx + 2].i * stride,
           D + (size_t)ops[idx + 3].i * stride, D + (size_t)j * stride, stride);
       idx += 4;
+    } else if (u0 > 0 && idx + 3 < end && ops[idx + 1].u > 0 &&
+               ops[idx + 1].j == j && ops[idx + 2].u > 0 &&
+               ops[idx + 2].j == j && ops[idx + 3].u > 0 &&
+               ops[idx + 3].j == j) {
+      neon_gf4(D + (size_t)ops[idx].i * stride,
+               D + (size_t)ops[idx + 1].i * stride,
+               D + (size_t)ops[idx + 2].i * stride,
+               D + (size_t)ops[idx + 3].i * stride, u0, ops[idx + 1].u,
+               ops[idx + 2].u, ops[idx + 3].u, D + (size_t)j * stride, stride);
+      idx += 4;
+    } else if (u0 == 1 && idx + 1 < end && ops[idx + 1].u == 1 &&
+               ops[idx + 1].j == j) {
+      neon_xor2(D + (size_t)ops[idx].i * stride,
+                D + (size_t)ops[idx + 1].i * stride, D + (size_t)j * stride,
+                stride);
+      idx += 2;
+    } else if (u0 > 0 && idx + 1 < end && ops[idx + 1].u > 0 &&
+               ops[idx + 1].j == j) {
+      neon_gf2(D + (size_t)ops[idx].i * stride,
+               D + (size_t)ops[idx + 1].i * stride, u0, ops[idx + 1].u,
+               D + (size_t)j * stride, stride);
+      idx += 2;
+    } else if (u0 == 1) {
+      neon_xor1(D + (size_t)ops[idx].i * stride, D + (size_t)j * stride,
+                stride);
+      idx++;
+    } else if (u0 > 1) {
+      neon_gf1(D + (size_t)ops[idx].i * stride, u0, D + (size_t)j * stride,
+               stride);
+      idx++;
     } else {
-      sched_op op = ops[idx++];
-      if (op.u)
-        axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, op.u,
-             stride);
-      else
-        scal(D + (size_t)op.i * stride, op.j, stride);
+      scal(D + (size_t)ops[idx].i * stride, j, stride);
+      idx++;
     }
   }
 }
 
 static void run_rev_neon(uint8_t *D, uint32_t stride, const sched_op *ops,
                          u32 count) {
-  void (*axpy)(uint8_t *, uint8_t *, uint8_t, uint32_t) = nanorq_oblas.axpy;
   u32 idx = count;
   while (idx > 0) {
     if (idx > 8)
@@ -1096,13 +1272,302 @@ static void run_rev_neon(uint8_t *D, uint32_t stride, const sched_op *ops,
                 D + (size_t)ops[idx - 4].i * stride, D + (size_t)j * stride,
                 stride);
       idx -= 4;
+    } else if (idx >= 2 && ops[idx - 2].j == j) {
+      neon_xor2(D + (size_t)ops[idx - 1].i * stride,
+                D + (size_t)ops[idx - 2].i * stride, D + (size_t)j * stride,
+                stride);
+      idx -= 2;
     } else {
-      sched_op op = ops[--idx];
-      axpy(D + (size_t)op.i * stride, D + (size_t)op.j * stride, 1, stride);
+      neon_xor1(D + (size_t)ops[idx - 1].i * stride, D + (size_t)j * stride,
+                stride);
+      idx--;
     }
   }
 }
 #endif /* NANORQ_OPS_NEON */
+
+#if defined(NANORQ_OPS_RVV)
+static inline void rvv_xor1(uint8_t *d0, const uint8_t *src, uint32_t len) {
+  for (uint32_t i = 0; i < len;) {
+    size_t vl = __riscv_vsetvl_e8m4(len - i);
+    vuint8m4_t s = __riscv_vle8_v_u8m4(src + i, vl);
+    vuint8m4_t v0 = __riscv_vle8_v_u8m4(d0 + i, vl);
+    __riscv_vse8_v_u8m4(d0 + i, __riscv_vxor_vv_u8m4(v0, s, vl), vl);
+    i += (uint32_t)vl;
+  }
+}
+
+static inline void rvv_xor2(uint8_t *d0, uint8_t *d1, const uint8_t *src,
+                            uint32_t len) {
+  for (uint32_t i = 0; i < len;) {
+    size_t vl = __riscv_vsetvl_e8m4(len - i);
+    vuint8m4_t s = __riscv_vle8_v_u8m4(src + i, vl);
+    __riscv_vse8_v_u8m4(
+        d0 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d0 + i, vl), s, vl),
+        vl);
+    __riscv_vse8_v_u8m4(
+        d1 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d1 + i, vl), s, vl),
+        vl);
+    i += (uint32_t)vl;
+  }
+}
+
+static inline void rvv_xor4(uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3,
+                            const uint8_t *src, uint32_t len) {
+  for (uint32_t i = 0; i < len;) {
+    size_t vl = __riscv_vsetvl_e8m4(len - i);
+    vuint8m4_t s = __riscv_vle8_v_u8m4(src + i, vl);
+    __riscv_vse8_v_u8m4(
+        d0 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d0 + i, vl), s, vl),
+        vl);
+    __riscv_vse8_v_u8m4(
+        d1 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d1 + i, vl), s, vl),
+        vl);
+    __riscv_vse8_v_u8m4(
+        d2 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d2 + i, vl), s, vl),
+        vl);
+    __riscv_vse8_v_u8m4(
+        d3 + i, __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(d3 + i, vl), s, vl),
+        vl);
+    i += (uint32_t)vl;
+  }
+}
+
+static inline void rvv_set4(uint8_t *dst, const uint8_t *r0, const uint8_t *r1,
+                            const uint8_t *r2, const uint8_t *r3,
+                            uint32_t len) {
+  for (uint32_t i = 0; i < len;) {
+    size_t vl = __riscv_vsetvl_e8m4(len - i);
+    vuint8m4_t v01 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r0 + i, vl),
+                                          __riscv_vle8_v_u8m4(r1 + i, vl), vl);
+    vuint8m4_t v23 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r2 + i, vl),
+                                          __riscv_vle8_v_u8m4(r3 + i, vl), vl);
+    __riscv_vse8_v_u8m4(dst + i, __riscv_vxor_vv_u8m4(v01, v23, vl), vl);
+    i += (uint32_t)vl;
+  }
+}
+
+static inline void rvv_acc4(uint8_t *dst, const uint8_t *r0, const uint8_t *r1,
+                            const uint8_t *r2, const uint8_t *r3,
+                            uint32_t len) {
+  for (uint32_t i = 0; i < len;) {
+    size_t vl = __riscv_vsetvl_e8m4(len - i);
+    vuint8m4_t v01 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r0 + i, vl),
+                                          __riscv_vle8_v_u8m4(r1 + i, vl), vl);
+    vuint8m4_t v23 = __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(r2 + i, vl),
+                                          __riscv_vle8_v_u8m4(r3 + i, vl), vl);
+    vuint8m4_t acc =
+        __riscv_vxor_vv_u8m4(__riscv_vle8_v_u8m4(dst + i, vl), v01, vl);
+    __riscv_vse8_v_u8m4(dst + i, __riscv_vxor_vv_u8m4(acc, v23, vl), vl);
+    i += (uint32_t)vl;
+  }
+}
+
+/* keep LMUL=1 for vrgather to avoid quadratic LMUL microcode penalties */
+static inline void rvv_gf1(uint8_t *d0, uint8_t u0, const uint8_t *src,
+                           uint32_t len) {
+  size_t tvl = __riscv_vsetvl_e8m1(16);
+  uint32_t i = 0;
+  if (tvl >= 16) {
+    vuint8m1_t lo0 = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + u0 * 16, tvl);
+    vuint8m1_t hi0 = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + u0 * 16, tvl);
+    for (; i < len;) {
+      size_t vl = __riscv_vsetvl_e8m1(len - i);
+      vuint8m1_t s = __riscv_vle8_v_u8m1(src + i, vl);
+      vuint8m1_t slo = __riscv_vand_vx_u8m1(s, 0x0f, vl);
+      vuint8m1_t shi = __riscv_vsrl_vx_u8m1(s, 4, vl);
+      vuint8m1_t p0 =
+          __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo0, slo, vl),
+                               __riscv_vrgather_vv_u8m1(hi0, shi, vl), vl);
+      __riscv_vse8_v_u8m1(
+          d0 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d0 + i, vl), p0, vl),
+          vl);
+      i += (uint32_t)vl;
+    }
+  }
+  for (; i < len; i++) {
+    uint8_t b = src[i];
+    if (b)
+      d0[i] ^= gf_mul_scalar(u0, b);
+  }
+}
+
+static inline void rvv_gf2(uint8_t *d0, uint8_t *d1, uint8_t u0, uint8_t u1,
+                           const uint8_t *src, uint32_t len) {
+  size_t tvl = __riscv_vsetvl_e8m1(16);
+  uint32_t i = 0;
+  if (tvl >= 16) {
+    vuint8m1_t lo0 = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + u0 * 16, tvl);
+    vuint8m1_t hi0 = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + u0 * 16, tvl);
+    vuint8m1_t lo1 = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + u1 * 16, tvl);
+    vuint8m1_t hi1 = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + u1 * 16, tvl);
+    for (; i < len;) {
+      size_t vl = __riscv_vsetvl_e8m1(len - i);
+      vuint8m1_t s = __riscv_vle8_v_u8m1(src + i, vl);
+      vuint8m1_t slo = __riscv_vand_vx_u8m1(s, 0x0f, vl);
+      vuint8m1_t shi = __riscv_vsrl_vx_u8m1(s, 4, vl);
+      vuint8m1_t p0 =
+          __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo0, slo, vl),
+                               __riscv_vrgather_vv_u8m1(hi0, shi, vl), vl);
+      vuint8m1_t p1 =
+          __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo1, slo, vl),
+                               __riscv_vrgather_vv_u8m1(hi1, shi, vl), vl);
+      __riscv_vse8_v_u8m1(
+          d0 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d0 + i, vl), p0, vl),
+          vl);
+      __riscv_vse8_v_u8m1(
+          d1 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d1 + i, vl), p1, vl),
+          vl);
+      i += (uint32_t)vl;
+    }
+  }
+  for (; i < len; i++) {
+    uint8_t b = src[i];
+    if (b) {
+      d0[i] ^= gf_mul_scalar(u0, b);
+      d1[i] ^= gf_mul_scalar(u1, b);
+    }
+  }
+}
+
+static inline void rvv_gf4(uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3,
+                           uint8_t u0, uint8_t u1, uint8_t u2, uint8_t u3,
+                           const uint8_t *src, uint32_t len) {
+  size_t tvl = __riscv_vsetvl_e8m1(16);
+  uint32_t i = 0;
+  if (tvl >= 16) {
+    vuint8m1_t lo0 = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + u0 * 16, tvl);
+    vuint8m1_t hi0 = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + u0 * 16, tvl);
+    vuint8m1_t lo1 = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + u1 * 16, tvl);
+    vuint8m1_t hi1 = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + u1 * 16, tvl);
+    vuint8m1_t lo2 = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + u2 * 16, tvl);
+    vuint8m1_t hi2 = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + u2 * 16, tvl);
+    vuint8m1_t lo3 = __riscv_vle8_v_u8m1(GF2_8_SHUF_LO + u3 * 16, tvl);
+    vuint8m1_t hi3 = __riscv_vle8_v_u8m1(GF2_8_SHUF_HI + u3 * 16, tvl);
+    for (; i < len;) {
+      size_t vl = __riscv_vsetvl_e8m1(len - i);
+      vuint8m1_t s = __riscv_vle8_v_u8m1(src + i, vl);
+      vuint8m1_t slo = __riscv_vand_vx_u8m1(s, 0x0f, vl);
+      vuint8m1_t shi = __riscv_vsrl_vx_u8m1(s, 4, vl);
+      vuint8m1_t p0 =
+          __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo0, slo, vl),
+                               __riscv_vrgather_vv_u8m1(hi0, shi, vl), vl);
+      vuint8m1_t p1 =
+          __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo1, slo, vl),
+                               __riscv_vrgather_vv_u8m1(hi1, shi, vl), vl);
+      vuint8m1_t p2 =
+          __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo2, slo, vl),
+                               __riscv_vrgather_vv_u8m1(hi2, shi, vl), vl);
+      vuint8m1_t p3 =
+          __riscv_vxor_vv_u8m1(__riscv_vrgather_vv_u8m1(lo3, slo, vl),
+                               __riscv_vrgather_vv_u8m1(hi3, shi, vl), vl);
+      __riscv_vse8_v_u8m1(
+          d0 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d0 + i, vl), p0, vl),
+          vl);
+      __riscv_vse8_v_u8m1(
+          d1 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d1 + i, vl), p1, vl),
+          vl);
+      __riscv_vse8_v_u8m1(
+          d2 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d2 + i, vl), p2, vl),
+          vl);
+      __riscv_vse8_v_u8m1(
+          d3 + i, __riscv_vxor_vv_u8m1(__riscv_vle8_v_u8m1(d3 + i, vl), p3, vl),
+          vl);
+      i += (uint32_t)vl;
+    }
+  }
+  for (; i < len; i++) {
+    uint8_t b = src[i];
+    if (b) {
+      d0[i] ^= gf_mul_scalar(u0, b);
+      d1[i] ^= gf_mul_scalar(u1, b);
+      d2[i] ^= gf_mul_scalar(u2, b);
+      d3[i] ^= gf_mul_scalar(u3, b);
+    }
+  }
+}
+
+static void run_fwd_rvv(uint8_t *D, uint32_t stride, const sched_op *ops,
+                        u32 beg, u32 end) {
+  void (*scal)(uint8_t *, uint8_t, uint32_t) = nanorq_oblas.scal;
+  u32 idx = beg;
+  while (idx < end) {
+    if (idx + 8 < end)
+      prefetch_row_w(D + (size_t)ops[idx + 8].i * stride, stride);
+    u32 j = ops[idx].j;
+    u8 u0 = ops[idx].u;
+    if (u0 == 1 && idx + 3 < end && ops[idx + 1].u == 1 &&
+        ops[idx + 1].j == j && ops[idx + 2].u == 1 && ops[idx + 2].j == j &&
+        ops[idx + 3].u == 1 && ops[idx + 3].j == j) {
+      rvv_xor4(
+          D + (size_t)ops[idx].i * stride, D + (size_t)ops[idx + 1].i * stride,
+          D + (size_t)ops[idx + 2].i * stride,
+          D + (size_t)ops[idx + 3].i * stride, D + (size_t)j * stride, stride);
+      idx += 4;
+    } else if (u0 > 0 && idx + 3 < end && ops[idx + 1].u > 0 &&
+               ops[idx + 1].j == j && ops[idx + 2].u > 0 &&
+               ops[idx + 2].j == j && ops[idx + 3].u > 0 &&
+               ops[idx + 3].j == j) {
+      rvv_gf4(D + (size_t)ops[idx].i * stride,
+              D + (size_t)ops[idx + 1].i * stride,
+              D + (size_t)ops[idx + 2].i * stride,
+              D + (size_t)ops[idx + 3].i * stride, u0, ops[idx + 1].u,
+              ops[idx + 2].u, ops[idx + 3].u, D + (size_t)j * stride, stride);
+      idx += 4;
+    } else if (u0 == 1 && idx + 1 < end && ops[idx + 1].u == 1 &&
+               ops[idx + 1].j == j) {
+      rvv_xor2(D + (size_t)ops[idx].i * stride,
+               D + (size_t)ops[idx + 1].i * stride, D + (size_t)j * stride,
+               stride);
+      idx += 2;
+    } else if (u0 > 0 && idx + 1 < end && ops[idx + 1].u > 0 &&
+               ops[idx + 1].j == j) {
+      rvv_gf2(D + (size_t)ops[idx].i * stride,
+              D + (size_t)ops[idx + 1].i * stride, u0, ops[idx + 1].u,
+              D + (size_t)j * stride, stride);
+      idx += 2;
+    } else if (u0 == 1) {
+      rvv_xor1(D + (size_t)ops[idx].i * stride, D + (size_t)j * stride, stride);
+      idx++;
+    } else if (u0 > 1) {
+      rvv_gf1(D + (size_t)ops[idx].i * stride, u0, D + (size_t)j * stride,
+              stride);
+      idx++;
+    } else {
+      scal(D + (size_t)ops[idx].i * stride, j, stride);
+      idx++;
+    }
+  }
+}
+
+static void run_rev_rvv(uint8_t *D, uint32_t stride, const sched_op *ops,
+                        u32 count) {
+  u32 idx = count;
+  while (idx > 0) {
+    if (idx > 8)
+      prefetch_row_w(D + (size_t)ops[idx - 8].i * stride, stride);
+    u32 j = ops[idx - 1].j;
+    if (idx >= 4 && ops[idx - 2].j == j && ops[idx - 3].j == j &&
+        ops[idx - 4].j == j) {
+      rvv_xor4(D + (size_t)ops[idx - 1].i * stride,
+               D + (size_t)ops[idx - 2].i * stride,
+               D + (size_t)ops[idx - 3].i * stride,
+               D + (size_t)ops[idx - 4].i * stride, D + (size_t)j * stride,
+               stride);
+      idx -= 4;
+    } else if (idx >= 2 && ops[idx - 2].j == j) {
+      rvv_xor2(D + (size_t)ops[idx - 1].i * stride,
+               D + (size_t)ops[idx - 2].i * stride, D + (size_t)j * stride,
+               stride);
+      idx -= 2;
+    } else {
+      rvv_xor1(D + (size_t)ops[idx - 1].i * stride, D + (size_t)j * stride,
+               stride);
+      idx--;
+    }
+  }
+}
+#endif /* NANORQ_OPS_RVV */
 
 static void run_fwd_generic(uint8_t *D, uint32_t stride, const sched_op *ops,
                             u32 beg, u32 end) {
@@ -1150,6 +1615,11 @@ static void dispatch_fwd(int simd, uint8_t *D, uint32_t stride,
     run_fwd_neon(D, stride, ops, beg, end);
     return;
   }
+#elif defined(NANORQ_OPS_RVV)
+  if (simd == OPS_SIMD_RVV) {
+    run_fwd_rvv(D, stride, ops, beg, end);
+    return;
+  }
 #else
   (void)simd;
 #endif
@@ -1178,6 +1648,11 @@ static void dispatch_rev(int simd, uint8_t *D, uint32_t stride,
 #elif defined(NANORQ_OPS_NEON)
   if (simd == OPS_SIMD_NEON) {
     run_rev_neon(D, stride, ops, count);
+    return;
+  }
+#elif defined(NANORQ_OPS_RVV)
+  if (simd == OPS_SIMD_RVV) {
+    run_rev_rvv(D, stride, ops, count);
     return;
   }
 #else
@@ -1296,6 +1771,38 @@ void ops_mix(nanorq_core *rq, uint8_t *D, uint32_t stride, u32 esi, u8 *ptr) {
         xor256_1(ptr, D + (size_t)mix[it] * stride, stride);
       return;
     }
+  }
+#elif defined(NANORQ_OPS_NEON)
+  int simd = get_ops_simd();
+  if (!aliases && num >= 4 && simd == OPS_SIMD_NEON) {
+    neon_set4(ptr, D + (size_t)mix[0] * stride, D + (size_t)mix[1] * stride,
+              D + (size_t)mix[2] * stride, D + (size_t)mix[3] * stride, stride);
+    u32 it = 4;
+    for (; it + 3 < num; it += 4) {
+      neon_acc4(ptr, D + (size_t)mix[it] * stride,
+                D + (size_t)mix[it + 1] * stride,
+                D + (size_t)mix[it + 2] * stride,
+                D + (size_t)mix[it + 3] * stride, stride);
+    }
+    for (; it < num; it++)
+      neon_xor1(ptr, D + (size_t)mix[it] * stride, stride);
+    return;
+  }
+#elif defined(NANORQ_OPS_RVV)
+  int simd = get_ops_simd();
+  if (!aliases && num >= 4 && simd == OPS_SIMD_RVV) {
+    rvv_set4(ptr, D + (size_t)mix[0] * stride, D + (size_t)mix[1] * stride,
+             D + (size_t)mix[2] * stride, D + (size_t)mix[3] * stride, stride);
+    u32 it = 4;
+    for (; it + 3 < num; it += 4) {
+      rvv_acc4(ptr, D + (size_t)mix[it] * stride,
+               D + (size_t)mix[it + 1] * stride,
+               D + (size_t)mix[it + 2] * stride,
+               D + (size_t)mix[it + 3] * stride, stride);
+    }
+    for (; it < num; it++)
+      rvv_xor1(ptr, D + (size_t)mix[it] * stride, stride);
+    return;
   }
 #endif
 
