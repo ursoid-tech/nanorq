@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Deterministic bidirectional RaptorQ fixtures; see t/INTEROP.md."""
+"""Check bidirectional RaptorQ interoperability using deterministic fixtures."""
 import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -12,9 +13,11 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+RUST_TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "t/raptorq_interop/target"))
+RUST_BIN = RUST_TARGET.resolve() / "release"
 TOOLS = {
     "nanorq": ROOT / "t/00util/interop",
-    "raptorq": ROOT / "t/raptorq_interop/target/release/fixture",
+    "raptorq": RUST_BIN / "fixture",
 }
 MAGIC = b"NRQFEC1\0"
 HEADER = struct.Struct(">8sQII")
@@ -98,6 +101,27 @@ def decode_case(directory, manifest):
         assert not output.exists(), "incomplete or malformed fixture published output"
 
 
+def check_cli():
+    """Exercise the native-endian data.rq format used by the shipped CLIs."""
+    with tempfile.TemporaryDirectory(prefix="nanorq-cli-") as work:
+        directory = Path(work)
+        payload = hashlib.shake_256(b"cli").digest(131073)
+        (directory / "input.bin").write_bytes(payload)
+        rust = RUST_BIN / "raptorq_interop"
+        for encoder, decoder in [
+            ([ROOT / "encode", "input.bin", "1280", "0", "0"],
+             [rust, "decode", "data.rq", "output.bin"]),
+            ([rust, "encode", "input.bin", "data.rq", "1280", "0", "0"],
+             [ROOT / "decode", "output.bin"]),
+        ]:
+            subprocess.run(encoder, cwd=directory, check=True, timeout=300)
+            subprocess.run(decoder, cwd=directory, check=True, timeout=300)
+            assert (directory / "output.bin").read_bytes() == payload, "CLI payload mismatch"
+            (directory / "output.bin").unlink()
+            (directory / "data.rq").unlink()
+    print("PASS CLI data.rq (both directions)", flush=True)
+
+
 def select_packets(packets, ks, repairs, loss, shape, order, seed):
     if shape in ("rank-failure", "rank-recovery"):
         # Known K=10 dependent equation, also covered by native api_regress.c.
@@ -162,8 +186,23 @@ def select_packets(packets, ks, repairs, loss, shape, order, seed):
     return [packets[i] for i in kept], budgets
 
 
+def check_geometry(manifest, geometry):
+    size = manifest["size"]
+    symbol_size = manifest["symbol_size"]
+    blocks = manifest["blocks"]
+    assert geometry["F"] == size, geometry
+    if manifest["encoder"] == "raptorq":
+        assert geometry["N"] >= manifest.get("rust_subblocks_min", 1), "expected interleaved sub-blocks"
+    if blocks:
+        total = (size + symbol_size - 1) // symbol_size
+        small, large = divmod(total, blocks)
+        assert geometry == {"F": size, "T": symbol_size, "Z": blocks,
+                            "N": 1, "Al": 8,
+                            "K": [small + (i < large) for i in range(blocks)]}, geometry
+
+
 def run_case(run_dir, seed, name, size, symbol_size, blocks, repairs,
-             loss=0, shape="random", order="source-first", explicit=True,
+             loss=0, shape="random", order="source-first",
              rust_subblocks_min=1):
     """A fixed repair count is chosen before any packet is removed."""
     success = True
@@ -174,6 +213,7 @@ def run_case(run_dir, seed, name, size, symbol_size, blocks, repairs,
         trace_seed = case_seed(seed, name)
         manifest = {"name": name, "seed": trace_seed, "encoder": encoder, "decoder": decoder,
                     "size": size, "symbol_size": symbol_size, "blocks": blocks,
+                    "rust_subblocks_min": rust_subblocks_min,
                     "repairs": repairs, "loss": loss, "shape": shape, "order": order,
                     "expected_exit": 2 if shape in ("over-budget", "rank-failure") else 0}
         try:
@@ -186,15 +226,7 @@ def run_case(run_dir, seed, name, size, symbol_size, blocks, repairs,
                     directory / "encode.log")
             common, scheme, packets, geometry = read_fixture(directory / "encoded.rqf")
             manifest["geometry"] = geometry
-            assert geometry["F"] == size
-            if encoder == "raptorq":
-                assert geometry["N"] >= rust_subblocks_min, "expected interleaved sub-blocks"
-            if explicit:
-                total = (size + symbol_size - 1) // symbol_size
-                small, large = divmod(total, blocks)
-                assert geometry == {"F": size, "T": symbol_size, "Z": blocks,
-                                    "N": 1, "Al": 8,
-                                    "K": [small + (i < large) for i in range(blocks)]}, geometry
+            check_geometry(manifest, geometry)
             hashes.append(hashlib.sha256((directory / "encoded.rqf").read_bytes()).hexdigest())
             received, budgets = select_packets(packets, geometry["K"], repairs,
                                                loss, shape, order, trace_seed)
@@ -210,7 +242,7 @@ def run_case(run_dir, seed, name, size, symbol_size, blocks, repairs,
             (directory / "case.json").write_text(json.dumps(manifest, indent=2) + "\n")
             print(f"FAIL {name}/{encoder}: {error}\n  retained: {directory}", flush=True)
     # Equal OTI and symbol ids must produce identical source and repair bytes.
-    if explicit and len(hashes) == 2 and hashes[0] != hashes[1]:
+    if blocks and len(hashes) == 2 and hashes[0] != hashes[1]:
         success = False
         print(f"FAIL {name}: encoders produced different fixture bytes", flush=True)
         for encoder, peer in (("nanorq", "raptorq"), ("raptorq", "nanorq")):
@@ -287,7 +319,7 @@ def replay_case(directory):
                      manifest["symbol_size"], manifest["blocks"], manifest["repairs"]],
                     scratch / "encode.log")
             common, scheme, packets, geometry = read_fixture(encoded)
-            assert geometry["F"] == manifest["size"]
+            check_geometry(manifest, geometry)
             received, _ = select_packets(
                 packets, geometry["K"], manifest["repairs"], manifest["loss"],
                 manifest["shape"], manifest["order"], manifest["seed"])
@@ -326,6 +358,7 @@ def main():
         replay_case(directory)
         print(f"Replay passed: {directory}")
         return 0
+    check_cli()
     artifacts = ROOT / "t/interop_test_dir"
     artifacts.mkdir(exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=artifacts))
@@ -365,11 +398,11 @@ def main():
     for shape in ["rank-failure", "rank-recovery"]:
         case(shape, 80, 8, 1, 133, shape=shape)
     # Preserve coverage of each implementation's automatic partition/alignment.
-    case("defaults", 65536, 500, 0, 8, loss=0, explicit=False)
-    case("defaults-small-symbol", 65536, 16, 0, 6, shape="single", explicit=False)
+    case("defaults", 65536, 500, 0, 8, loss=0)
+    case("defaults-small-symbol", 65536, 16, 0, 6, shape="single")
     if not args.quick:
         case("defaults-interleaved", 10000 * 1280, 1280, 0, 6,
-             shape="single", explicit=False, rust_subblocks_min=2)
+             shape="single", rust_subblocks_min=2)
     results.append(malformed_cases(run_dir))
     failures = results.count(False)
     print(f"Results: {len(results) - failures} groups passed, {failures} failed", flush=True)
